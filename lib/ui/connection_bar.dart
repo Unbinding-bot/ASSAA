@@ -123,6 +123,46 @@ class _ConnectionBarState extends State<ConnectionBar> {
                         'against a known tap distance on your own rig.',
                         style: TextStyle(color: AppColors.textDim, fontSize: 10),
                       ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          const Text('Tx@1m', style: TextStyle(color: AppColors.textDim, fontSize: 11)),
+                          Expanded(
+                            child: Slider(
+                              min: -70,
+                              max: -20,
+                              value: widget.controller.rssiTxPowerAt1m.clamp(-70, -20).toDouble(),
+                              label: '${widget.controller.rssiTxPowerAt1m.round()} dBm',
+                              onChanged: (v) => widget.controller.setRssiCalibration(txPowerAt1m: v),
+                            ),
+                          ),
+                          Text('${widget.controller.rssiTxPowerAt1m.round()}dBm',
+                              style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          const Text('Path loss', style: TextStyle(color: AppColors.textDim, fontSize: 11)),
+                          Expanded(
+                            child: Slider(
+                              min: 2.0,
+                              max: 5.0,
+                              value: widget.controller.rssiPathLossExponent.clamp(2.0, 5.0).toDouble(),
+                              label: widget.controller.rssiPathLossExponent.toStringAsFixed(1),
+                              onChanged: (v) => widget.controller.setRssiCalibration(pathLossExponent: v),
+                            ),
+                          ),
+                          Text(widget.controller.rssiPathLossExponent.toStringAsFixed(1),
+                              style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
+                        ],
+                      ),
+                      const Text(
+                        'RSSI calibration for the "you are here" rescuer fix -- '
+                        'Tx@1m is the node\'s signal strength at 1m, path loss is '
+                        'how fast it fades through debris. Walk a known distance '
+                        'and adjust until the dot lines up.',
+                        style: TextStyle(color: AppColors.textDim, fontSize: 10),
+                      ),
                     ],
                   ),
                 ),

@@ -4,8 +4,10 @@ import 'dart:collection';
 import 'math3d.dart';
 import 'models/event.dart';
 import 'models/node.dart';
+import 'models/rescuer.dart';
 import 'models/voxel.dart';
 import 'localization/fusion.dart';
+import 'localization/rssi_localization.dart';
 import 'localization/tdoa_solver.dart';
 import 'localization/tomography.dart';
 import 'services/data_source.dart';
@@ -39,7 +41,11 @@ class AppController {
   static const _maxLog = 200;
 
   TdoaResult? lastFix;
+  RescuerFix? rescuerFix;
+  final _rescuerSamples = <int, RescuerRssiSample>{}; // latest per node
   double wavespeedMps = 300.0; // live-tunable; rubble propagation speed
+  double rssiTxPowerAt1m = -40.0; // live-tunable RF calibration
+  double rssiPathLossExponent = 3.0; // live-tunable RF calibration
   ConnectionMode mode = ConnectionMode.none;
 
   DataSource? _source;
@@ -70,6 +76,8 @@ class AppController {
     recentEvents.clear();
     recentTapCycles.clear();
     lastFix = null;
+    rescuerFix = null;
+    _rescuerSamples.clear();
 
     _source = next;
     _sub = next.messages.listen(_handleMessage, onError: (e) {
@@ -93,6 +101,12 @@ class AppController {
     _notify();
   }
 
+  void setRssiCalibration({double? txPowerAt1m, double? pathLossExponent}) {
+    if (txPowerAt1m != null) rssiTxPowerAt1m = txPowerAt1m;
+    if (pathLossExponent != null) rssiPathLossExponent = pathLossExponent;
+    _notify();
+  }
+
   void _handleMessage(Object msg) {
     if (msg is SensorNode) {
       nodes[msg.id] = msg;
@@ -100,6 +114,8 @@ class AppController {
       _handleTapCycle(msg);
     } else if (msg is DetectionEvent) {
       _handleDetection(msg);
+    } else if (msg is RescuerRssiSample) {
+      _handleRescuerRssi(msg);
     }
     _notify();
   }
@@ -150,6 +166,39 @@ class AppController {
       final kindLabel = cluster.first.kind == EventKind.scream ? 'scream' : 'knock';
       _log('$kindLabel cluster (${cluster.length} nodes) -> '
           'confidence ${(result.confidence * 100).toStringAsFixed(0)}%');
+    }
+  }
+
+  void _handleRescuerRssi(RescuerRssiSample sample) {
+    _rescuerSamples[sample.nodeId] = sample;
+
+    // Drop stale readings so a fix doesn't linger on nodes that stopped
+    // hearing the phone a while ago (rescuer moved on).
+    final cutoff = DateTime.now().subtract(const Duration(seconds: 4));
+    _rescuerSamples.removeWhere((_, s) => s.receivedAt.isBefore(cutoff));
+    if (_rescuerSamples.isEmpty) return;
+
+    // Search box centered on the node array's own bounding region, with
+    // enough margin that a rescuer standing just outside the array still
+    // resolves instead of getting clipped to the grid edge.
+    if (nodes.isEmpty) return;
+    final xs = nodes.values.map((n) => n.position.x);
+    final ys = nodes.values.map((n) => n.position.y);
+    final zs = nodes.values.map((n) => n.position.z);
+    final cx = (xs.reduce((a, b) => a + b)) / nodes.length;
+    final cy = (ys.reduce((a, b) => a + b)) / nodes.length;
+    final cz = (zs.reduce((a, b) => a + b)) / nodes.length;
+
+    final fix = solveRescuerPosition(
+      latestByNode: _rescuerSamples,
+      nodes: nodes,
+      searchOrigin: Vec3(cx, cy, cz),
+      searchExtent: const Vec3(16, 16, 6),
+      txPowerAt1mDbm: rssiTxPowerAt1m,
+      pathLossExponent: rssiPathLossExponent,
+    );
+    if (fix != null) {
+      rescuerFix = fix;
     }
   }
 

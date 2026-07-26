@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../math3d.dart';
 import '../models/event.dart';
 import '../models/node.dart';
+import '../models/rescuer.dart';
 import 'data_source.dart';
 
 /// Connects to the gateway node's WebSocket and translates its JSON
@@ -95,6 +96,13 @@ class GatewayService implements DataSource {
           kind: _kindFromString(msg['kind'] as String?),
           amplitude: (msg['amplitude'] as num?)?.toDouble() ?? 0.5,
           confidence: (msg['confidence'] as num?)?.toDouble() ?? 1.0,
+        ));
+        break;
+
+      case 'rescuer_rssi':
+        _controller.add(RescuerRssiSample(
+          nodeId: msg['node'] as int,
+          dbm: (msg['dbm'] as num).toDouble(),
         ));
         break;
     }

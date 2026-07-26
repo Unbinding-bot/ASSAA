@@ -31,6 +31,16 @@ abstract class DataSource {
 ///     -- a passive knock/scream transient, "ms" relative to the last
 ///        sync broadcast (see event-driven timing scheme).
 ///
+///   {"type":"rescuer_rssi","node":6,"dbm":-58}
+///     -- node 6 passively sniffed the phone's WiFi frames (promiscuous
+///        mode, no association needed) at this signal strength. Several
+///        nodes reporting this gives the app enough anchors to trilaterate
+///        the rescuer's own position relative to the array -- the "you are
+///        here" dot. This is the opposite direction of the usual RSSI
+///        story (nodes measuring the phone, not the phone scanning for
+///        nodes), which is what makes it work without any WiFi-scanning
+///        permissions or platform plugin on the phone side.
+///
 /// Deliberately NOT streaming raw waveforms over the mesh -- ESP-NOW
 /// bandwidth through multi-hop rubble is tight, so classification
 /// happens onboard each node and only the result is sent.

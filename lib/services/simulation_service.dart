@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import '../math3d.dart';
 import '../models/event.dart';
 import '../models/node.dart';
+import '../models/rescuer.dart';
 import 'data_source.dart';
 
 /// Generates a synthetic scenario: a scatter of nodes thrown into a
@@ -20,9 +21,11 @@ class SimulationService implements DataSource {
   Timer? _tapTimer;
   Timer? _passiveTimer;
   Timer? _telemetryTimer;
+  Timer? _rescuerTimer;
 
   late List<SensorNode> _nodes;
   late Vec3 _survivor;
+  double _rescuerAngle = 0.0;
   static const double _wavespeedMps = 300.0; // rough rubble default
 
   @override
@@ -67,6 +70,30 @@ class SimulationService implements DataSource {
     _passiveTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (_rng.nextDouble() < 0.55) {
         _emitPassiveCluster();
+      }
+    });
+
+    // Rescuer walk: the phone-carrier orbits the pile's perimeter, and
+    // each node passively reports how strongly it hears the phone from
+    // wherever it currently stands. This is what the "you are here" dot
+    // trilaterates from.
+    _rescuerTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+      _rescuerAngle += 0.15;
+      final radius = 5.0 + math.sin(_rescuerAngle * 0.3);
+      final rescuerPos = Vec3(
+        math.cos(_rescuerAngle) * radius,
+        math.sin(_rescuerAngle) * radius,
+        1.4, // roughly chest/hand height above the debris surface
+      );
+      for (final node in _nodes) {
+        final distM = node.position.distanceTo(rescuerPos);
+        if (distM > 12.0) continue; // out of WiFi range
+        // Inverse log-distance path loss plus noise, matching the model
+        // rssi_localization.dart expects to invert.
+        const txPowerAt1m = -40.0;
+        const pathLossExponent = 3.0;
+        final dbm = txPowerAt1m - 10 * pathLossExponent * (math.log(distM.clamp(0.3, 100)) / math.ln10) + _rand(-3, 3);
+        _controller.add(RescuerRssiSample(nodeId: node.id, dbm: dbm));
       }
     });
   }
@@ -153,6 +180,7 @@ class SimulationService implements DataSource {
     _tapTimer?.cancel();
     _passiveTimer?.cancel();
     _telemetryTimer?.cancel();
+    _rescuerTimer?.cancel();
     _controller.close();
   }
 }
