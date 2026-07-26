@@ -18,25 +18,26 @@ subprojects {
 
 subprojects {
     project.evaluationDependsOn(":app")
+}
 
-    // Forces every plugin subproject (including tflite_flutter, which
-    // otherwise compiles its Kotlin against JVM 17 while its Java
-    // compilation stays on 1.8 and Gradle refuses to mix the two) onto a
-    // single consistent JVM target.
-    //
-    // This has to be wrapped in afterEvaluate: subprojects{} runs BEFORE
-    // each subproject's own build.gradle applies the Android Gradle
-    // Plugin, and AGP sets compileOptions from that plugin's own script
-    // (tflite_flutter's still hardcodes JavaVersion.VERSION_1_8) AFTER
-    // that point -- so without afterEvaluate, AGP's 1.8 silently
-    // overwrites whatever we set here first.
-    afterEvaluate {
-        tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+// Runs once, after every project (including plugin subprojects like
+// tflite_flutter) has fully finished configuring. This is what lets our
+// JVM target override win over AGP's own compileOptions setting.
+//
+// Deliberately NOT a per-subproject afterEvaluate{} -- combined with
+// evaluationDependsOn(":app") above, that caused "Cannot run
+// Project.afterEvaluate(Action) when the project is already evaluated"
+// for whichever project the dependency ordering had already forced
+// through evaluation by the time the loop reached it. projectsEvaluated
+// is a single Gradle-level lifecycle hook with no such per-project race.
+gradle.projectsEvaluated {
+    subprojects.forEach { sub ->
+        sub.tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
             compilerOptions {
                 jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
             }
         }
-        tasks.withType<JavaCompile>().configureEach {
+        sub.tasks.withType<JavaCompile>().configureEach {
             sourceCompatibility = JavaVersion.VERSION_17.toString()
             targetCompatibility = JavaVersion.VERSION_17.toString()
         }
