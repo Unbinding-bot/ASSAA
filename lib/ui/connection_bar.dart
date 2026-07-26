@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
+import '../services/data_source.dart';
 import '../theme.dart';
 
 class ConnectionBar extends StatefulWidget {
@@ -27,6 +28,27 @@ class _ConnectionBarState extends State<ConnectionBar> {
       stream: widget.controller.onChange,
       builder: (context, _) {
         final mode = widget.controller.mode;
+        final connStatus = widget.controller.connectionStatus;
+        final statusColor = switch (mode) {
+          ConnectionMode.none => AppColors.textDim,
+          ConnectionMode.sim => AppColors.amber,
+          ConnectionMode.live => switch (connStatus) {
+              ConnectionStatus.connected => AppColors.green,
+              ConnectionStatus.connecting || ConnectionStatus.reconnecting => AppColors.amber,
+              ConnectionStatus.error || ConnectionStatus.disconnected => AppColors.red,
+            },
+        };
+        final statusLabel = switch (mode) {
+          ConnectionMode.none => 'Disconnected',
+          ConnectionMode.sim => 'Simulation running',
+          ConnectionMode.live => switch (connStatus) {
+              ConnectionStatus.connected => 'Live: connected',
+              ConnectionStatus.connecting => 'Live: connecting...',
+              ConnectionStatus.reconnecting => 'Live: reconnecting...',
+              ConnectionStatus.error => 'Live: connection lost, retrying',
+              ConnectionStatus.disconnected => 'Live: disconnected',
+            },
+        };
         return Material(
           color: AppColors.panel,
           child: Column(
@@ -40,17 +62,11 @@ class _ConnectionBarState extends State<ConnectionBar> {
                       Icon(
                         mode == ConnectionMode.none ? Icons.circle_outlined : Icons.circle,
                         size: 10,
-                        color: mode == ConnectionMode.none
-                            ? AppColors.textDim
-                            : (mode == ConnectionMode.sim ? AppColors.amber : AppColors.green),
+                        color: statusColor,
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        switch (mode) {
-                          ConnectionMode.none => 'Disconnected',
-                          ConnectionMode.sim => 'Simulation running',
-                          ConnectionMode.live => 'Live: gateway',
-                        },
+                        statusLabel,
                         style: const TextStyle(color: AppColors.text, fontWeight: FontWeight.bold, fontSize: 13),
                       ),
                       const Spacer(),

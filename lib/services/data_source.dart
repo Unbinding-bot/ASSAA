@@ -1,9 +1,19 @@
+import 'dart:async';
+
+/// Lifecycle of the underlying connection. Sim mode has no real
+/// connection concerns and just reports `connected` once started; Live
+/// mode (see esp32_connection.dart) reflects actual WebSocket/heartbeat
+/// state, including automatic reconnect attempts.
+enum ConnectionStatus { disconnected, connecting, connected, reconnecting, error }
+
 /// Everything downstream (DSP, TDOA, tomography, UI) consumes this stream
 /// and doesn't care whether it came from the simulator or a real gateway
 /// WebSocket. Swapping Sim for Live is just swapping which DataSource
 /// implementation feeds the same StreamController.
 abstract class DataSource {
-  Stream<Object> get messages; // emits SensorNode | DetectionEvent | TapCycle
+  Stream<Object> get messages; // emits SensorNode | DetectionEvent | TapCycle | RawDetectionSample | RescuerRssiSample
+  Stream<ConnectionStatus> get status =>
+      Stream.value(ConnectionStatus.connected); // default: sim doesn't need real status tracking
   Future<void> start();
   void stop();
 }
@@ -28,8 +38,16 @@ abstract class DataSource {
 ///
 ///   {"type":"detection","node":4,"kind":"knock","ms":812.0,
 ///    "amplitude":0.71,"confidence":0.9}
-///     -- a passive knock/scream transient, "ms" relative to the last
-///        sync broadcast (see event-driven timing scheme).
+///     -- a passive transient the FIRMWARE has already classified. Kept
+///        for early bring-up before feature extraction exists onboard.
+///
+///   {"type":"detection_raw","node":4,"ms":812.0,"durationMs":95,
+///    "lowBand":0.6,"midBand":0.1,"vocalBand":0.05,"centroidHz":80,
+///    "zcr":12.5,"peakAmp":0.71}
+///     -- PREFERRED: the firmware extracts cheap features (see
+///        ml/feature_vector.dart) but leaves classification to the
+///        phone's person-presence model, since that's the part meant to
+///        improve over time without reflashing firmware.
 ///
 ///   {"type":"rescuer_rssi","node":6,"dbm":-58}
 ///     -- node 6 passively sniffed the phone's WiFi frames (promiscuous
@@ -41,7 +59,19 @@ abstract class DataSource {
 ///        nodes), which is what makes it work without any WiFi-scanning
 ///        permissions or platform plugin on the phone side.
 ///
+///   {"type":"pong","t":123456}
+///     -- reply to an app-level heartbeat ping (see below). Used only to
+///        confirm the connection is still alive; never reaches the UI.
+///
 /// Deliberately NOT streaming raw waveforms over the mesh -- ESP-NOW
-/// bandwidth through multi-hop rubble is tight, so classification
-/// happens onboard each node and only the result is sent.
+/// bandwidth through multi-hop rubble is tight, so feature extraction (or
+/// full classification, in the fallback "detection" case) happens
+/// onboard each node and only a small result is sent.
+///
+/// OUTGOING (phone -> gateway), sent as the same JSON-text-frame format:
+///
+///   {"type":"ping","t":123456}
+///     -- app-level heartbeat, sent periodically by
+///        services/esp32_connection.dart. Expects a "pong" back within a
+///        timeout or the connection is considered dead and reconnected.
 /// ---------------------------------------------------------------------

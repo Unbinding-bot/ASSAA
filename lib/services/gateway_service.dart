@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../math3d.dart';
+import '../ml/feature_vector.dart';
 import '../models/event.dart';
 import '../models/node.dart';
 import '../models/rescuer.dart';
@@ -30,6 +31,9 @@ class GatewayService implements DataSource {
 
   @override
   Stream<Object> get messages => _controller.stream;
+
+  @override
+  Stream<ConnectionStatus> get status => Stream.value(ConnectionStatus.connected);
 
   @override
   Future<void> start() async {
@@ -99,13 +103,32 @@ class GatewayService implements DataSource {
         ));
         break;
 
+      case 'detection_raw':
+        _controller.add(RawDetectionSample(
+          nodeId: msg['node'] as int,
+          timestampMs: (msg['ms'] as num).toDouble(),
+          features: SignalFeatures.fromJson(msg),
+        ));
+        break;
+
       case 'rescuer_rssi':
         _controller.add(RescuerRssiSample(
           nodeId: msg['node'] as int,
           dbm: (msg['dbm'] as num).toDouble(),
         ));
         break;
+
+      case 'pong':
+        _controller.add(const GatewayPong());
+        break;
     }
+  }
+
+  /// Sends a JSON message to the gateway (used for the heartbeat ping in
+  /// esp32_connection.dart, and available for future outgoing needs like
+  /// pushing calibration values to the firmware).
+  void send(Map<String, dynamic> message) {
+    _channel?.sink.add(jsonEncode(message));
   }
 
   void _flushOpenCycle() {

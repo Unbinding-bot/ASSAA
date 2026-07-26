@@ -1,3 +1,4 @@
+import '../ml/feature_vector.dart';
 import '../models/event.dart';
 import 'fft.dart';
 
@@ -81,4 +82,15 @@ class ThresholdDetector {
     _lastTriggerMs = nowMs;
     return true;
   }
+}
+
+/// Derives a knock/scream/unknown category directly from an already
+/// -extracted SignalFeatures summary, for the live "detection_raw"
+/// protocol path where the app receives features rather than a raw
+/// waveform. Same rough separation as classifyTransient() above, just
+/// operating on the compact feature vector instead of samples.
+EventKind kindFromFeatures(SignalFeatures f) {
+  if (f.durationMs < 150 && f.lowBandEnergy > 0.5) return EventKind.knock;
+  if (f.durationMs > 200 && f.vocalBandEnergy > 0.3) return EventKind.scream;
+  return EventKind.unknown;
 }

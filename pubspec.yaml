@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   web_socket_channel: ^2.4.0
+  tflite_flutter: ^0.11.0
   cupertino_icons: ^1.0.6
 
 dev_dependencies:
@@ -19,3 +20,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/models/

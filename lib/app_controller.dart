@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:collection';
 
+import 'dsp/transient_detector.dart';
 import 'math3d.dart';
+import 'ml/material_model.dart';
+import 'ml/model_manager.dart';
 import 'models/event.dart';
 import 'models/node.dart';
 import 'models/rescuer.dart';
@@ -11,7 +14,7 @@ import 'localization/rssi_localization.dart';
 import 'localization/tdoa_solver.dart';
 import 'localization/tomography.dart';
 import 'services/data_source.dart';
-import 'services/gateway_service.dart';
+import 'services/esp32_connection.dart';
 import 'services/simulation_service.dart';
 
 enum ConnectionMode { none, sim, live }
@@ -30,7 +33,19 @@ class AppController {
       origin: const Vec3(-5, -5, -2.5),
       cellSize: 1.0,
     );
+    // Fire-and-forget: tries to load trained TFLite models, falls back to
+    // heuristics if they're not there yet (expected until the NIP
+    // collaboration produces real ones). Logged either way.
+    // ignore: unawaited_futures
+    modelManager.initialize().then((_) {
+      _log('Person model: ${modelManager.personModelIsTrained ? "trained" : "heuristic"}. '
+          'Material model: ${modelManager.materialModelIsTrained ? "trained" : "heuristic"}.');
+      _notify();
+    });
   }
+
+  final modelManager = ModelManager();
+  ConnectionStatus connectionStatus = ConnectionStatus.disconnected;
 
   final nodes = <int, SensorNode>{};
   late final VoxelGrid grid;
@@ -50,6 +65,7 @@ class AppController {
 
   DataSource? _source;
   StreamSubscription? _sub;
+  StreamSubscription? _statusSub;
 
   final _onChange = StreamController<void>.broadcast();
   Stream<void> get onChange => _onChange.stream;
@@ -62,7 +78,7 @@ class AppController {
   }
 
   Future<void> connectLive(Uri gatewayUri) async {
-    await _swapSource(GatewayService(gatewayUri));
+    await _swapSource(Esp32GatewayConnection(gatewayUri));
     mode = ConnectionMode.live;
     _log('Connecting to gateway at $gatewayUri ...');
     _notify();
@@ -70,6 +86,7 @@ class AppController {
 
   Future<void> _swapSource(DataSource next) async {
     _sub?.cancel();
+    _statusSub?.cancel();
     _source?.stop();
     nodes.clear();
     grid.resetAll();
@@ -78,10 +95,15 @@ class AppController {
     lastFix = null;
     rescuerFix = null;
     _rescuerSamples.clear();
+    connectionStatus = ConnectionStatus.disconnected;
 
     _source = next;
     _sub = next.messages.listen(_handleMessage, onError: (e) {
       _log('Data source error: $e');
+      _notify();
+    });
+    _statusSub = next.status.listen((s) {
+      connectionStatus = s;
       _notify();
     });
     await next.start();
@@ -89,9 +111,11 @@ class AppController {
 
   void disconnect() {
     _sub?.cancel();
+    _statusSub?.cancel();
     _source?.stop();
     _source = null;
     mode = ConnectionMode.none;
+    connectionStatus = ConnectionStatus.disconnected;
     _log('Disconnected.');
     _notify();
   }
@@ -112,12 +136,30 @@ class AppController {
       nodes[msg.id] = msg;
     } else if (msg is TapCycle) {
       _handleTapCycle(msg);
+    } else if (msg is RawDetectionSample) {
+      _handleRawDetection(msg);
     } else if (msg is DetectionEvent) {
       _handleDetection(msg);
     } else if (msg is RescuerRssiSample) {
       _handleRescuerRssi(msg);
     }
     _notify();
+  }
+
+  /// Runs the person-presence model on firmware-extracted features (the
+  /// preferred live path) or simulator-synthesized ones, then hands the
+  /// result into the same detection pipeline a pre-classified "detection"
+  /// message would use.
+  void _handleRawDetection(RawDetectionSample sample) {
+    final kind = kindFromFeatures(sample.features);
+    final personResult = modelManager.personModel.predict(sample.features);
+    _handleDetection(DetectionEvent(
+      nodeId: sample.nodeId,
+      timestampMs: sample.timestampMs,
+      kind: kind,
+      amplitude: sample.features.peakAmplitude,
+      confidence: personResult.probability,
+    ));
   }
 
   void _handleTapCycle(TapCycle cycle) {
@@ -132,8 +174,40 @@ class AppController {
       baselineWavespeedMps: wavespeedMps,
     );
     fuseVoxelGrid(grid);
+    _classifyMaterials(cycle);
     _log('Tap cycle from node ${cycle.tapperId}: '
         '${cycle.arrivalMs.length} arrivals.');
+  }
+
+  /// Runs the material model on each tapper->listener path from this
+  /// cycle. Mirrors the expected/residual travel-time calculation in
+  /// tomography.dart's backProjectTapCycle deliberately kept separate --
+  /// this is a diagnostic/logging concern, not the numeric localization
+  /// pipeline, so the two stay decoupled even though the math overlaps.
+  void _classifyMaterials(TapCycle cycle) {
+    final tapper = nodes[cycle.tapperId];
+    if (tapper == null) return;
+
+    cycle.arrivalMs.forEach((listenerId, measuredMs) {
+      final listener = nodes[listenerId];
+      if (listener == null) return;
+      final distM = tapper.position.distanceTo(listener.position);
+      if (distM < 0.05) return;
+
+      final expectedMs = (distM / wavespeedMps) * 1000;
+      final features = TapFeatures(
+        travelTimeMs: measuredMs,
+        expectedTravelTimeMs: expectedMs,
+        residualMs: measuredMs - expectedMs,
+      );
+      final result = modelManager.materialModel.predict(features);
+
+      // Only worth surfacing when it's not just "solid concrete, move on".
+      if (result.predicted != MaterialType.concrete && result.confidence > 0.4) {
+        _log('Node ${cycle.tapperId}->$listenerId path -> '
+            '${result.predicted.name} (${(result.confidence * 100).toStringAsFixed(0)}%)');
+      }
+    });
   }
 
   void _handleDetection(DetectionEvent event) {
@@ -145,7 +219,7 @@ class AppController {
 
     // Re-cluster the recent window and try to solve the most recent
     // cluster. Cheap enough at this event rate and grid size.
-    final windowMs = 400.0;
+    const windowMs = 400.0;
     final recent = recentEvents
         .where((e) => e.timestampMs >= event.timestampMs - windowMs)
         .toList();
@@ -215,7 +289,9 @@ class AppController {
 
   void dispose() {
     _sub?.cancel();
+    _statusSub?.cancel();
     _source?.stop();
+    modelManager.dispose();
     _onChange.close();
   }
 }

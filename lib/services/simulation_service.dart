@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import '../math3d.dart';
+import '../ml/feature_vector.dart';
 import '../models/event.dart';
 import '../models/node.dart';
 import '../models/rescuer.dart';
@@ -30,6 +31,9 @@ class SimulationService implements DataSource {
 
   @override
   Stream<Object> get messages => _controller.stream;
+
+  @override
+  Stream<ConnectionStatus> get status => Stream.value(ConnectionStatus.connected);
 
   @override
   Future<void> start() async {
@@ -148,7 +152,7 @@ class SimulationService implements DataSource {
 
   void _emitPassiveCluster() {
     final isReal = _rng.nextDouble() < 0.7; // vs. background noise
-    final kind = _rng.nextBool() ? EventKind.knock : EventKind.scream;
+    final isKnock = _rng.nextBool();
     final sourcePos = isReal
         ? _survivor
         : Vec3(_rand(-4, 4), _rand(-4, 4), _rand(-2, 1));
@@ -156,19 +160,54 @@ class SimulationService implements DataSource {
     // Only nodes within plausible range hear it; each hears it at a
     // different time based on distance -- this delay spread is exactly
     // what the TDOA solver needs.
-    final baseT = 0.0;
+    const baseT = 0.0;
     for (final node in _nodes) {
       if (node.role == NodeRole.gateway) continue;
       final distM = node.position.distanceTo(sourcePos);
       if (distM > 10.0) continue;
       if (_rng.nextDouble() > 0.8) continue; // dropped packet / not heard
       final delayMs = baseT + (distM / _wavespeedMps) * 1000 + _rand(-3, 3);
-      _controller.add(DetectionEvent(
+
+      // Synthesize features a real person-presence model would plausibly
+      // see: a genuine knock/scream near the survivor gets clean,
+      // characteristic band energy; background noise gets messier,
+      // broadband, noisier features -- this is what actually exercises
+      // ModelManager.personModel end-to-end in Sim mode, rather than
+      // just hardcoding a confidence number.
+      final features = isReal
+          ? (isKnock
+              ? SignalFeatures(
+                  durationMs: _rand(40, 130),
+                  lowBandEnergy: _rand(0.6, 0.9),
+                  midBandEnergy: _rand(0.05, 0.15),
+                  vocalBandEnergy: _rand(0.0, 0.1),
+                  spectralCentroidHz: _rand(60, 140),
+                  zeroCrossingRate: _rand(20, 80),
+                  peakAmplitude: _rand(0.5, 1.0),
+                )
+              : SignalFeatures(
+                  durationMs: _rand(220, 500),
+                  lowBandEnergy: _rand(0.05, 0.15),
+                  midBandEnergy: _rand(0.1, 0.2),
+                  vocalBandEnergy: _rand(0.4, 0.7),
+                  spectralCentroidHz: _rand(500, 1800),
+                  zeroCrossingRate: _rand(150, 350),
+                  peakAmplitude: _rand(0.5, 1.0),
+                ))
+          : SignalFeatures(
+              durationMs: _rand(30, 400),
+              lowBandEnergy: _rand(0.2, 0.4),
+              midBandEnergy: _rand(0.2, 0.4),
+              vocalBandEnergy: _rand(0.1, 0.3),
+              spectralCentroidHz: _rand(200, 900),
+              zeroCrossingRate: _rand(350, 600), // messier, less periodic
+              peakAmplitude: _rand(0.2, 0.5),
+            );
+
+      _controller.add(RawDetectionSample(
         nodeId: node.id,
         timestampMs: delayMs,
-        kind: kind,
-        amplitude: isReal ? _rand(0.5, 1.0) : _rand(0.2, 0.5),
-        confidence: isReal ? _rand(0.7, 0.98) : _rand(0.3, 0.6),
+        features: features,
       ));
     }
   }
