@@ -1,9 +1,12 @@
 import 'dart:math' as math;
 
-/// Small self-contained 3D math helper. Deliberately not pulling in the
-/// `vector_math` package -- this app only needs points, distance, and one
-/// yaw/pitch rotation for the orbit camera, so a 20-line class keeps the
-/// dependency surface (and offline-build risk) minimal.
+import 'package:flutter/material.dart' show Offset;
+
+/// 3-component point used throughout the codebase for node positions,
+/// voxel centres, TDOA fixes, and waypoints. The z-axis represents depth
+/// (metres below the sensor plane, positive = deeper) and is only used for
+/// the depth-estimate readout and voxel-layer filtering — NOT for rendering.
+/// The map is always drawn top-down in the XY plane.
 class Vec3 {
   final double x, y, z;
   const Vec3(this.x, this.y, this.z);
@@ -16,8 +19,13 @@ class Vec3 {
     return math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
-  /// Perpendicular distance from this point to the segment a->b.
-  /// Used by the tomography back-projection to weight voxels near a ray.
+  double distanceTo2d(Vec3 o) {
+    final dx = x - o.x, dy = y - o.y;
+    return math.sqrt(dx * dx + dy * dy);
+  }
+
+  /// Perpendicular distance from this point to the segment a→b.
+  /// Used by tomography back-projection to weight voxels near a ray path.
   double distanceToSegment(Vec3 a, Vec3 b) {
     final ab = b - a;
     final abLenSq = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
@@ -28,40 +36,45 @@ class Vec3 {
     final proj = Vec3(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
     return distanceTo(proj);
   }
-
-  /// Rotate around Y (yaw) then X (pitch), used by the orbit camera.
-  Vec3 rotated(double yaw, double pitch) {
-    // Yaw around Y axis
-    final cosY = math.cos(yaw), sinY = math.sin(yaw);
-    final x1 = x * cosY + z * sinY;
-    final z1 = -x * sinY + z * cosY;
-    // Pitch around X axis
-    final cosP = math.cos(pitch), sinP = math.sin(pitch);
-    final y2 = y * cosP - z1 * sinP;
-    final z2 = y * sinP + z1 * cosP;
-    return Vec3(x1, y2, z2);
-  }
 }
 
-/// Simple perspective projection of a rotated point onto screen space.
-/// Returns null if the point is behind the camera.
-class Projected {
-  final double screenX, screenY, depth, scale;
-  Projected(this.screenX, this.screenY, this.depth, this.scale);
-}
+// =============================================================================
+// Flat 2-D projection  (replaces the old orbit-camera perspective pipeline)
+// =============================================================================
 
-Projected? project(Vec3 world, {
-  required double yaw,
-  required double pitch,
+/// How many screen pixels correspond to 1 metre at zoom = 1.0.
+const double kPixelsPerMetre = 40.0;
+
+/// Projects a world-space point (x metres, y metres) onto screen coordinates.
+/// [panX] / [panY] are the current canvas pan offsets in pixels.
+/// Y is flipped so that world +Y points up on screen (north = up).
+Offset projectFlat(
+  Vec3 world, {
   required double zoom,
   required double cx,
   required double cy,
-  double cameraDistance = 14.0,
-  double focalLength = 900.0,
+  double panX = 0.0,
+  double panY = 0.0,
 }) {
-  final r = world.rotated(yaw, pitch);
-  final camZ = r.z + cameraDistance;
-  if (camZ <= 0.5) return null;
-  final scale = (focalLength * zoom) / camZ;
-  return Projected(cx + r.x * scale, cy - r.y * scale, camZ, scale);
+  final scale = zoom * kPixelsPerMetre;
+  return Offset(
+    cx + panX + world.x * scale,
+    cy + panY - world.y * scale, // flip Y: world-up → screen-up
+  );
+}
+
+/// Inverse of [projectFlat]: converts a screen tap position back to world
+/// coordinates (z is always 0 — placement is always on the ground plane).
+Vec3 unprojectFlat(
+  Offset screen, {
+  required double zoom,
+  required double cx,
+  required double cy,
+  double panX = 0.0,
+  double panY = 0.0,
+}) {
+  final scale = zoom * kPixelsPerMetre;
+  final wx = (screen.dx - cx - panX) / scale;
+  final wy = -(screen.dy - cy - panY) / scale; // flip back
+  return Vec3(wx, wy, 0.0);
 }

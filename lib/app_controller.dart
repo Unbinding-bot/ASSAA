@@ -114,8 +114,8 @@ class _NodeFilterBank {
 class AppController {
   AppController() {
     grid = VoxelGrid(
-      nx: 10, ny: 10, nz: 5,
-      origin: const Vec3(-5, -5, -2.5),
+      nx: 10, ny: 10, nz: 1,   // flat 2-D grid — z-axis is depth estimate only
+      origin: const Vec3(-5, -5, 0.0),
       cellSize: 1.0,
     );
     // ignore: unawaited_futures
@@ -384,9 +384,10 @@ class AppController {
     };
     if (nodePositions.length < 3) { return; }
 
-    // ── 2-D LM solve constrained to the triangle's Z-plane ────────────────
-    final fixedZ     = quadrant?.planeZ;
-    final initGuess  = quadrant?.triangleCentroid ?? _gridCenter();
+    // Always constrain to z=0 — the map is 2-D. The z component of the
+    // result is the solver's depth estimate (shown as a chip on the map).
+    const fixedZ    = 0.0;
+    final initGuess = quadrant?.triangleCentroid ?? _gridCenter();
 
     final result = solveTdoaLM(
       rangeDiffsM:   rangeDiffs,

@@ -283,7 +283,8 @@ TdoaResult? solveTdoa({
     rangeDiffsM:   rangeDiffs,
     nodePositions: nodePositions,
     refNodeId:     refId,
-    initialGuess:  gridCenter, // Chan runs internally; gridCenter unused if Chan succeeds
+    fixedZ:        0.0,          // always 2-D — z returned is depth estimate
+    initialGuess:  gridCenter,
   );
 }
 

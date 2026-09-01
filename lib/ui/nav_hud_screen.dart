@@ -87,39 +87,44 @@ class _StatusBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       color:   c.panel,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          _Chip(
-            label: 'FIX',
-            value: fix == null
-                ? '—'
-                : '${(fix.confidence * 100).toStringAsFixed(0)}%',
-            color: fix == null
-                ? c.textDim
-                : fix.confidence >= 0.6
-                    ? c.green
-                    : fix.confidence >= 0.3
-                        ? c.amber
-                        : c.red,
-            labelColor: c.textDim,
+          Expanded(
+            child: _Chip(
+              label: 'FIX',
+              value: fix == null
+                  ? '—'
+                  : '${(fix.confidence * 100).toStringAsFixed(0)}%',
+              color: fix == null
+                  ? c.textDim
+                  : fix.confidence >= 0.6
+                      ? c.green
+                      : fix.confidence >= 0.3
+                          ? c.amber
+                          : c.red,
+              labelColor: c.textDim,
+            ),
           ),
-          _Chip(
-            label: 'RESCUER',
-            value: rescuer == null
-                ? '—'
-                : '±${rescuer.accuracyM.toStringAsFixed(1)}m',
-            color:      rescuer == null ? c.textDim : c.accent,
-            labelColor: c.textDim,
+          Expanded(
+            child: _Chip(
+              label: 'RESCUER',
+              value: rescuer == null
+                  ? '—'
+                  : '±${rescuer.accuracyM.toStringAsFixed(1)}m',
+              color:      rescuer == null ? c.textDim : c.accent,
+              labelColor: c.textDim,
+            ),
           ),
-          _Chip(
-            label: 'DIST',
-            value: nav == null
-                ? '—'
-                : '${nav!.distanceM.toStringAsFixed(1)}m',
-            color:      nav == null ? c.textDim : c.text,
-            labelColor: c.textDim,
+          Expanded(
+            child: _Chip(
+              label: 'DIST',
+              value: nav == null
+                  ? '—'
+                  : '${nav!.distanceM.toStringAsFixed(1)}m',
+              color:      nav == null ? c.textDim : c.text,
+              labelColor: c.textDim,
+            ),
           ),
         ],
       ),
@@ -142,15 +147,25 @@ class _Chip extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(label,
-            style: TextStyle(
-                color:         labelColor,
-                fontSize:      10,
-                letterSpacing: 1.1)),
+        Text(
+          label,
+          maxLines:  1,
+          overflow:  TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color:         labelColor,
+            fontSize:      10,
+            letterSpacing: 1.1,
+          ),
+        ),
         const SizedBox(height: 2),
-        Text(value,
-            style: TextStyle(
-                color:      color,
+        Text(
+          value,
+          maxLines:  1,
+          overflow:  TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color:      color,
                 fontSize:   14,
                 fontWeight: FontWeight.bold)),
       ],

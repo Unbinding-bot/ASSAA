@@ -11,11 +11,15 @@ import 'voxel_painter.dart';
 export 'voxel_painter.dart' show CameraState;
 
 // =============================================================================
-// MapScreen
+// MapScreen  — flat 2-D top-down acoustic map
 // =============================================================================
 
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key, required this.controller, required this.settings});
+  const MapScreen({
+    super.key,
+    required this.controller,
+    required this.settings,
+  });
   final AppController controller;
   final AppSettings   settings;
 
@@ -26,18 +30,18 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen>
     with SingleTickerProviderStateMixin {
   final camera = CameraState();
-  double _gestureStartScale = 1.0;
-  RangeValues _depthRange = const RangeValues(-2.5, 2.5);
 
-  // Ripple animation controller — drives repaints for all active ripples.
+  // Gesture state.
+  double _gestureStartScale = 1.0;
+  Offset _gestureStartFocal = Offset.zero;
+
+  // Ripple animation.
   late final AnimationController _rippleCtrl;
   late final Animation<double>   _rippleAnim;
-
-  // Live ripple event list — populated whenever a new TDOA fix arrives.
   final List<RippleEvent> _rippleEvents = [];
   double? _lastFixConfidence;
 
-  // Pending waypoint placement (set when user taps in placement mode).
+  // Waypoint placement mode.
   bool _waypointPlacementMode = false;
 
   @override
@@ -45,11 +49,10 @@ class _MapScreenState extends State<MapScreen>
     super.initState();
     _rippleCtrl = AnimationController(
       vsync:    this,
-      duration: const Duration(seconds: 60), // long-running, looping
+      duration: const Duration(seconds: 60),
     )..repeat();
     _rippleAnim = _rippleCtrl;
 
-    // Watch for new TDOA fixes and spawn ripples.
     widget.controller.onChange.listen((_) => _onControllerUpdate());
   }
 
@@ -57,27 +60,21 @@ class _MapScreenState extends State<MapScreen>
     final fix = widget.controller.lastFix;
     final ndt = widget.controller.lastNdtResult;
     if (fix == null) { return; }
-
-    // Only spawn a new ripple when a genuinely new fix lands.
     if (fix.confidence == _lastFixConfidence) { return; }
     _lastFixConfidence = fix.confidence;
 
-    // Frequency: derive a proxy from the NDT result label if available,
-    // otherwise use confidence to map to the knock/scream/impact range.
     final double fPeak;
     if (ndt != null) {
       fPeak = switch (ndt.label) {
-        NdtLabel.solid      => 5000.0, // high freq → red ripple (kinetic impact band)
-        NdtLabel.voidRegion =>  300.0, // low freq  → yellow ripple (structural knock band)
-        NdtLabel.unknown    => 1500.0, // mid freq  → green ripple (ambiguous)
+        NdtLabel.solid      => 5000.0,
+        NdtLabel.voidRegion =>  300.0,
+        NdtLabel.unknown    => 1500.0,
       };
     } else {
       fPeak = 300.0 + fix.confidence * 4000.0;
     }
 
-    // Remove expired events before adding a new one.
     _rippleEvents.removeWhere((e) => e.isExpired(DateTime.now()));
-
     setState(() {
       _rippleEvents.add(RippleEvent(
         position: fix.position,
@@ -85,7 +82,6 @@ class _MapScreenState extends State<MapScreen>
       ));
     });
   }
-
 
   @override
   void dispose() {
@@ -98,7 +94,7 @@ class _MapScreenState extends State<MapScreen>
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: widget.settings,
-      builder: (context, _) => _buildInner(context),
+      builder: (_, __) => _buildInner(context),
     );
   }
 
@@ -111,22 +107,28 @@ class _MapScreenState extends State<MapScreen>
         Expanded(
           child: Stack(
             children: [
-              // ── Base: voxel 3D map canvas ─────────────────────────────────
+              // ── Canvas ───────────────────────────────────────────────────
               Positioned.fill(
                 child: GestureDetector(
-                  onScaleStart: (_) => _gestureStartScale = 1.0,
+                  onScaleStart: (details) {
+                    _gestureStartScale = 1.0;
+                    _gestureStartFocal = details.localFocalPoint;
+                  },
                   onScaleUpdate: (details) {
-                    if (!camera.topDown) {
-                      camera.orbit(
-                        details.focalPointDelta.dx * 0.008,
-                        details.focalPointDelta.dy * -0.008,
-                      );
+                    // Two-finger: zoom around focal point.
+                    if (details.pointerCount >= 2) {
+                      final factor = details.scale / _gestureStartScale;
+                      if (factor != 1.0) {
+                        camera.scale(factor);
+                        _gestureStartScale = details.scale;
+                      }
                     }
-                    final factor = details.scale / _gestureStartScale;
-                    if (factor != 1.0) {
-                      camera.scale(factor);
-                      _gestureStartScale = details.scale;
-                    }
+                    // One or two finger: pan by focal-point delta.
+                    camera.pan(
+                      details.localFocalPoint.dx - _gestureStartFocal.dx,
+                      details.localFocalPoint.dy - _gestureStartFocal.dy,
+                    );
+                    _gestureStartFocal = details.localFocalPoint;
                   },
                   onTapUp: _waypointPlacementMode ? _onMapTap : null,
                   child: StreamBuilder<void>(
@@ -135,14 +137,13 @@ class _MapScreenState extends State<MapScreen>
                       animation: camera,
                       builder: (ctx, _) => LayoutBuilder(
                         builder: (ctx, constraints) {
-                          final cx = constraints.maxWidth / 2;
+                          final cx = constraints.maxWidth  / 2;
                           final cy = constraints.maxHeight / 2;
-                          final yaw   = camera.topDown ? 0.0   : camera.yaw;
-                          final pitch = camera.topDown ? 1.5533 : camera.pitch;
 
                           return Stack(children: [
-                            // Layer: voxel heatmap
-                            if (settings.layers.heatmap || settings.layers.nodes)
+                            // Layer: voxel heatmap + nodes.
+                            if (settings.layers.heatmap ||
+                                settings.layers.nodes)
                               CustomPaint(
                                 painter: VoxelMapPainter(
                                   controller: widget.controller,
@@ -152,21 +153,23 @@ class _MapScreenState extends State<MapScreen>
                                 size: Size.infinite,
                               ),
 
-                            // Layer: ripples
+                            // Layer: ripples.
                             if (settings.layers.ripples)
                               CustomPaint(
                                 painter: RipplePainter(
                                   events:    _rippleEvents,
                                   palette:   settings.frequencyPalette,
                                   animation: _rippleAnim,
-                                  yaw: yaw, pitch: pitch,
-                                  zoom: camera.zoom,
-                                  cx: cx, cy: cy,
+                                  zoom:      camera.zoom,
+                                  cx:        cx,
+                                  cy:        cy,
+                                  panX:      camera.panX,
+                                  panY:      camera.panY,
                                 ),
                                 size: Size.infinite,
                               ),
 
-                            // Layer: flags / waypoints
+                            // Layer: waypoint flags.
                             if (settings.layers.flags)
                               CustomPaint(
                                 painter: WaypointPainter(
@@ -179,9 +182,11 @@ class _MapScreenState extends State<MapScreen>
                                             visible:  w.visible,
                                           ))
                                       .toList(),
-                                  yaw: yaw, pitch: pitch,
-                                  zoom: camera.zoom,
-                                  cx: cx, cy: cy,
+                                  zoom:  camera.zoom,
+                                  cx:    cx,
+                                  cy:    cy,
+                                  panX:  camera.panX,
+                                  panY:  camera.panY,
                                   panelColor:   c.panel,
                                   textDimColor: c.textDim,
                                 ),
@@ -195,27 +200,16 @@ class _MapScreenState extends State<MapScreen>
                 ),
               ),
 
-              // ── Top-right camera controls ─────────────────────────────────
+              // ── Camera controls (top-right) ───────────────────────────────
               Positioned(
                 top: 12, right: 12,
                 child: Column(
                   children: [
                     _RoundButton(
                       c:       c,
-                      icon:    camera.topDown ? Icons.view_in_ar : Icons.map_outlined,
-                      tooltip: camera.topDown ? '3D view' : '2D top-down',
-                      onTap:   () => setState(camera.toggleTopDown),
-                    ),
-                    const SizedBox(height: 8),
-                    _RoundButton(
-                      c:       c,
                       icon:    Icons.refresh,
-                      tooltip: 'Reset camera',
-                      onTap:   () => setState(() {
-                        camera.yaw   = 0.6;
-                        camera.pitch = 0.35;
-                        camera.zoom  = 1.0;
-                      }),
+                      tooltip: 'Reset view',
+                      onTap:   () => setState(camera.resetView),
                     ),
                     const SizedBox(height: 8),
                     _RoundButton(
@@ -226,104 +220,157 @@ class _MapScreenState extends State<MapScreen>
                       tooltip: _waypointPlacementMode
                           ? 'Cancel flag placement'
                           : 'Place flag',
-                      onTap: () => setState(
-                          () => _waypointPlacementMode = !_waypointPlacementMode),
+                      onTap:   () => setState(
+                          () => _waypointPlacementMode =
+                              !_waypointPlacementMode),
                       active: _waypointPlacementMode,
                     ),
                   ],
                 ),
               ),
 
-              // ── Top-left NDT panel ────────────────────────────────────────
+              // ── NDT panel (top-left) ──────────────────────────────────────
               Positioned(
                 top: 12, left: 12,
+                // Constrain width so it never overflows on narrow phones.
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 200),
+                  child: StreamBuilder<void>(
+                    stream: widget.controller.onChange,
+                    builder: (ctx, _) {
+                      final ndt = widget.controller.lastNdtResult;
+                      final q   = widget.controller.activeQuadrant;
+                      if (ndt == null) {
+                        return const SizedBox.shrink();
+                      }
+                      return _NdtPanel(result: ndt, quadrant: q, c: c);
+                    },
+                  ),
+                ),
+              ),
+
+              // ── Depth-estimate strip (top-centre, below NDT) ─────────────
+              Positioned(
+                top: 12,
+                left: 220,   // clear of the NDT panel
+                right: 60,   // clear of the camera buttons
                 child: StreamBuilder<void>(
                   stream: widget.controller.onChange,
                   builder: (ctx, _) {
-                    final ndt = widget.controller.lastNdtResult;
-                    final q   = widget.controller.activeQuadrant;
-                    if (ndt == null) { return const SizedBox.shrink(); }
-                    return _NdtPanel(result: ndt, quadrant: q, c: c);
+                    final fix = widget.controller.lastFix;
+                    if (fix == null) { return const SizedBox.shrink(); }
+                    return _DepthEstimateChip(
+                      depthM: fix.position.z,
+                      c:      c,
+                    );
                   },
                 ),
               ),
 
-              // ── Placement mode banner ─────────────────────────────────────
+              // ── Placement-mode banner (top, full width) ───────────────────
               if (_waypointPlacementMode)
                 Positioned(
                   top: 0, left: 0, right: 0,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    color: c.accent.withValues(alpha: 0.85),
-                    child: Text(
-                      'TAP MAP TO PLACE FLAG',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color:       c.bg,
-                        fontSize:    12,
-                        fontWeight:  FontWeight.bold,
-                        letterSpacing: 1.2,
+                  child: IgnorePointer(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      color:   c.accent.withValues(alpha: 0.85),
+                      child: Text(
+                        'TAP MAP TO PLACE FLAG',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color:         c.bg,
+                          fontSize:      12,
+                          fontWeight:    FontWeight.bold,
+                          letterSpacing: 1.2,
+                        ),
                       ),
                     ),
                   ),
                 ),
 
-              // ── Bottom: floating layer chip bar ───────────────────────────
+              // ── Layer chip bar (bottom, scrollable) ───────────────────────
               Positioned(
-                left: 8, right: 8, bottom: 8,
-                child: _LayerChipBar(settings: settings, c: c),
+                left: 0, right: 0, bottom: 8,
+                child: Center(
+                  child: _LayerChipBar(settings: settings, c: c),
+                ),
               ),
             ],
           ),
-        ),
-
-        // ── Depth slicer ───────────────────────────────────────────────────
-        _DepthSlicer(
-          range:    _depthRange,
-          c:        c,
-          onChanged: (r) {
-            setState(() {
-              _depthRange      = r;
-              camera.sliceMinZ = r.start;
-              camera.sliceMaxZ = r.end;
-            });
-          },
         ),
       ],
     );
   }
 
-  // ── Waypoint placement ────────────────────────────────────────────────────
+  // ── Waypoint placement ──────────────────────────────────────────────────
 
   void _onMapTap(TapUpDetails details) {
     final renderBox = context.findRenderObject() as RenderBox?;
     if (renderBox == null) { return; }
-
     final localPos = renderBox.globalToLocal(details.globalPosition);
     final cx = renderBox.size.width  / 2;
     final cy = renderBox.size.height / 2;
 
-    const focalLength    = 900.0;
-    const cameraDistance = 14.0;
-    final scale = (focalLength * camera.zoom) / (0.0 + cameraDistance);
-    final wx    = (localPos.dx - cx) / scale;
-    final wy    = -(localPos.dy - cy) / scale;
+    final worldPos = unprojectFlat(
+      localPos,
+      zoom: camera.zoom,
+      cx:   cx,
+      cy:   cy,
+      panX: camera.panX,
+      panY: camera.panY,
+    );
 
-    final settings = widget.settings;
-    final idx      = settings.waypoints.length + 1;
-    final wp = Waypoint(
+    final idx = widget.settings.waypoints.length + 1;
+    widget.settings.addWaypoint(Waypoint(
       id:       'flag_$idx',
       label:    'Flag $idx',
-      position: Vec3(wx, wy, 0.0),
+      position: worldPos,
       color:    const Color(0xFFFF5722),
-    );
-    settings.addWaypoint(wp);
+    ));
     setState(() => _waypointPlacementMode = false);
   }
 }
 
 // =============================================================================
-// Floating layer chip bar  (spec §3)
+// Depth-estimate chip
+// =============================================================================
+
+/// Shows the solver's z-estimate (depth below sensor plane) from the last fix.
+/// This is the only depth information displayed — the map itself is flat 2-D.
+class _DepthEstimateChip extends StatelessWidget {
+  const _DepthEstimateChip({required this.depthM, required this.c});
+  final double    depthM;
+  final AppColors c;
+
+  @override
+  Widget build(BuildContext context) {
+    // z convention: positive = deeper underground.
+    final label = depthM.abs() < 0.05
+        ? 'Depth: surface'
+        : depthM > 0
+            ? 'Depth: ~${depthM.toStringAsFixed(1)} m below'
+            : 'Depth: ~${depthM.abs().toStringAsFixed(1)} m above';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color:        c.panel.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(12),
+        border:       Border.all(color: c.panelBorder),
+      ),
+      child: Text(
+        label,
+        maxLines:  1,
+        overflow:  TextOverflow.ellipsis,
+        style:     TextStyle(color: c.textDim, fontSize: 11),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// Layer chip bar  — scrollable single row
 // =============================================================================
 
 class _LayerChipBar extends StatelessWidget {
@@ -334,11 +381,11 @@ class _LayerChipBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final layers = [
-      ('nodes',    Icons.sensors,              'Nodes'),
-      ('ripples',  Icons.radio_button_unchecked,'Ripples'),
-      ('heatmap',  Icons.grid_4x4,             'Heatmap'),
-      ('flags',    Icons.flag,                 'Flags'),
-      ('guidance', Icons.explore,              'Vectors'),
+      ('nodes',    Icons.sensors,               'Nodes'),
+      ('ripples',  Icons.radio_button_unchecked, 'Ripples'),
+      ('heatmap',  Icons.grid_4x4,              'Heatmap'),
+      ('flags',    Icons.flag,                  'Flags'),
+      ('guidance', Icons.explore,               'Vectors'),
     ];
 
     final active = {
@@ -350,6 +397,9 @@ class _LayerChipBar extends StatelessWidget {
     };
 
     return Container(
+      // Let the chip bar scroll horizontally on very narrow screens instead
+      // of overflowing off the edge.
+      constraints: const BoxConstraints(maxWidth: double.infinity),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color:        c.panel.withValues(alpha: 0.92),
@@ -363,37 +413,39 @@ class _LayerChipBar extends StatelessWidget {
           ),
         ],
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          ...layers.map((layer) {
-            final key     = layer.$1;
-            final icon    = layer.$2;
-            final label   = layer.$3;
-            final enabled = active[key] ?? false;
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 3),
-              child: _LayerChip(
-                icon:    icon,
-                label:   label,
-                enabled: enabled,
-                c:       c,
-                onTap:   () => settings.toggleLayer(key),
-              ),
-            );
-          }),
-          const SizedBox(width: 4),
-          Container(width: 1, height: 20, color: c.panelBorder),
-          const SizedBox(width: 4),
-          _LayerChip(
-            icon:    Icons.settings,
-            label:   'Config',
-            enabled: false,
-            c:       c,
-            onTap:   () => Navigator.of(context).pushNamed('/settings'),
-          ),
-        ],
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ...layers.map((layer) {
+              final key     = layer.$1;
+              final icon    = layer.$2;
+              final label   = layer.$3;
+              final enabled = active[key] ?? false;
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: _LayerChip(
+                  icon:    icon,
+                  label:   label,
+                  enabled: enabled,
+                  c:       c,
+                  onTap:   () => settings.toggleLayer(key),
+                ),
+              );
+            }),
+            const SizedBox(width: 4),
+            Container(width: 1, height: 20, color: c.panelBorder),
+            const SizedBox(width: 4),
+            _LayerChip(
+              icon:    Icons.settings,
+              label:   'Config',
+              enabled: false,
+              c:       c,
+              onTap:   () => Navigator.of(context).pushNamed('/settings'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -407,10 +459,10 @@ class _LayerChip extends StatelessWidget {
     required this.c,
     required this.onTap,
   });
-  final IconData icon;
-  final String   label;
-  final bool     enabled;
-  final AppColors c;
+  final IconData     icon;
+  final String       label;
+  final bool         enabled;
+  final AppColors    c;
   final VoidCallback onTap;
 
   @override
@@ -426,7 +478,9 @@ class _LayerChip extends StatelessWidget {
               : Colors.transparent,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: enabled ? c.accent.withValues(alpha: 0.5) : Colors.transparent,
+            color: enabled
+                ? c.accent.withValues(alpha: 0.5)
+                : Colors.transparent,
           ),
         ),
         child: Row(
@@ -443,7 +497,7 @@ class _LayerChip extends StatelessWidget {
 }
 
 // =============================================================================
-// Shared small widgets
+// Shared button widget
 // =============================================================================
 
 class _RoundButton extends StatelessWidget {
@@ -474,7 +528,7 @@ class _RoundButton extends StatelessWidget {
           onTap: onTap,
           child: Padding(
             padding: const EdgeInsets.all(10),
-            child: Icon(icon,
+            child:   Icon(icon,
                 color: active ? c.bg : c.text, size: 20),
           ),
         ),
@@ -483,48 +537,8 @@ class _RoundButton extends StatelessWidget {
   }
 }
 
-class _DepthSlicer extends StatelessWidget {
-  const _DepthSlicer({
-    required this.range,
-    required this.c,
-    required this.onChanged,
-  });
-  final RangeValues             range;
-  final AppColors               c;
-  final ValueChanged<RangeValues> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color:   c.panel,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: Row(
-        children: [
-          Icon(Icons.layers_outlined, size: 16, color: c.textDim),
-          const SizedBox(width: 8),
-          Text('Depth slice',
-              style: TextStyle(color: c.textDim, fontSize: 11)),
-          Expanded(
-            child: RangeSlider(
-              min:        -2.5,
-              max:         2.5,
-              divisions:  10,
-              values:     range,
-              labels: RangeLabels(
-                '${range.start.toStringAsFixed(1)}m',
-                '${range.end.toStringAsFixed(1)}m',
-              ),
-              onChanged: onChanged,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 // =============================================================================
-// NDT result panel  (carried forward, now theme-aware)
+// NDT result panel  — constrained for mobile
 // =============================================================================
 
 class _NdtPanel extends StatelessWidget {
@@ -533,9 +547,9 @@ class _NdtPanel extends StatelessWidget {
     required this.quadrant,
     required this.c,
   });
-  final NdtResult        result;
-  final QuadrantResult?  quadrant;
-  final AppColors        c;
+  final NdtResult       result;
+  final QuadrantResult? quadrant;
+  final AppColors       c;
 
   @override
   Widget build(BuildContext context) {
@@ -553,47 +567,63 @@ class _NdtPanel extends StatelessWidget {
         quadrant?.nodes.map((n) => n.id.toString()).join(', ') ?? '—';
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color:         c.panel.withValues(alpha: 0.9),
-        borderRadius:  BorderRadius.circular(8),
-        border:        Border.all(color: color.withValues(alpha: 0.6)),
+        color:        c.panel.withValues(alpha: 0.9),
+        borderRadius: BorderRadius.circular(8),
+        border:       Border.all(color: color.withValues(alpha: 0.6)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Title row — icon + label + confidence, all in one line.
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: color, size: 16),
+              Icon(icon, color: color, size: 14),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  result.displayLabel,
+                  maxLines:  1,
+                  overflow:  TextOverflow.ellipsis,
+                  style:     TextStyle(
+                    color:       color,
+                    fontWeight:  FontWeight.bold,
+                    fontSize:    12,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ),
               const SizedBox(width: 6),
-              Text(result.displayLabel,
-                  style: TextStyle(
-                      color: color, fontWeight: FontWeight.bold,
-                      fontSize: 13, letterSpacing: 0.8)),
-              const SizedBox(width: 8),
-              Text('${(result.confidence * 100).toStringAsFixed(0)}%',
-                  style: TextStyle(color: c.textDim, fontSize: 12)),
+              Text(
+                '${(result.confidence * 100).toStringAsFixed(0)}%',
+                style: TextStyle(color: c.textDim, fontSize: 11),
+              ),
             ],
           ),
-          const SizedBox(height: 4),
-          Text('Triangle: nodes $nodeIds',
-              style: TextStyle(color: c.textDim, fontSize: 10)),
+          const SizedBox(height: 3),
+          Text(
+            'Nodes: $nodeIds',
+            maxLines:  1,
+            overflow:  TextOverflow.ellipsis,
+            style:     TextStyle(color: c.textDim, fontSize: 9),
+          ),
           const SizedBox(height: 2),
-          _ProbBar('Solid',
-              result.probabilities[NdtLabel.solid]      ?? 0, c.green,                  c),
-          _ProbBar('Void',
-              result.probabilities[NdtLabel.voidRegion] ?? 0, c.red,                    c),
-          _ProbBar('?',
-              result.probabilities[NdtLabel.unknown]    ?? 0, const Color(0xFF9E9E9E), c),
+          _ProbBar('S', result.probabilities[NdtLabel.solid]      ?? 0, c.green,                  c),
+          _ProbBar('V', result.probabilities[NdtLabel.voidRegion] ?? 0, c.red,                    c),
+          _ProbBar('?', result.probabilities[NdtLabel.unknown]    ?? 0, const Color(0xFF9E9E9E), c),
           if (result.label == NdtLabel.unknown) ...[
-            const SizedBox(height: 4),
-            Text('Re-test recommended',
-                style: TextStyle(
-                    color:       c.amber,
-                    fontSize:    9,
-                    fontStyle:   FontStyle.italic)),
+            const SizedBox(height: 3),
+            Text(
+              'Re-test recommended',
+              style: TextStyle(
+                color:     c.amber,
+                fontSize:  9,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
           ],
         ],
       ),
@@ -616,12 +646,13 @@ class _ProbBar extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox(
-            width: 36,
+            width: 12,
             child: Text(label,
                 style: TextStyle(color: c.textDim, fontSize: 9)),
           ),
+          const SizedBox(width: 2),
           SizedBox(
-            width: 60, height: 5,
+            width: 55, height: 5,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(2),
               child: LinearProgressIndicator(
