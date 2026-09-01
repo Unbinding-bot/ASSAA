@@ -188,6 +188,10 @@ class AppController {
   final _onChange = StreamController<void>.broadcast();
   Stream<void> get onChange => _onChange.stream;
 
+  // Broadcast filtered audio frames to any subscriber (e.g. ShowcaseTab).
+  final _onAudioFrame = StreamController<AudioFrame>.broadcast();
+  Stream<AudioFrame> get audioFrames => _onAudioFrame.stream;
+
   // ── Connection management ────────────────────────────────────────────────
 
   Future<void> connectSim() async {
@@ -320,6 +324,12 @@ class AppController {
     final (filtered, band) = bank.bestBand(frame.samples,
         includeCustom: useCustomFilterBand);
     _latestFilteredFrames[frame.nodeId] = filtered;
+    // Broadcast the filtered frame to UI subscribers (e.g. ShowcaseTab).
+    _onAudioFrame.add(AudioFrame(
+      nodeId:      frame.nodeId,
+      timestampUs: frame.timestampUs,
+      samples:     filtered,
+    ));
     _frameSynchronizer.add(frame);
     _detectTransientInFrame(frame.nodeId, filtered, band,
         frame.timestampUs / 1000.0, frame.timestampUs);
@@ -812,5 +822,6 @@ class AppController {
     _frameSynchronizer.dispose();
     modelManager.dispose();
     _onChange.close();
+    _onAudioFrame.close();
   }
 }

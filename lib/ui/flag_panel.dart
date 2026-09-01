@@ -96,11 +96,28 @@ class FlagPanel extends StatelessWidget {
                         itemCount:   settings.waypoints.length,
                         separatorBuilder: (_, __) =>
                             Divider(height: 1, color: c.panelBorder),
-                        itemBuilder: (ctx, i) => _WaypointTile(
-                          wp:       settings.waypoints[i],
-                          settings: settings,
-                          c:        c,
-                        ),
+                        itemBuilder: (ctx, i) {
+                          final wp = settings.waypoints[i];
+                          return Dismissible(
+                            key:       ValueKey(wp.id),
+                            direction: DismissDirection.endToStart,
+                            background: Container(
+                              alignment: Alignment.centerRight,
+                              padding:   const EdgeInsets.only(right: 20),
+                              color:     c.red.withValues(alpha: 0.85),
+                              child: const Icon(
+                                  Icons.delete_outline,
+                                  color: Colors.white,
+                                  size: 22),
+                            ),
+                            onDismissed: (_) => settings.removeWaypoint(wp.id),
+                            child: _WaypointTile(
+                              wp:       wp,
+                              settings: settings,
+                              c:        c,
+                            ),
+                          );
+                        },
                       ),
               ),
             ],
@@ -203,6 +220,13 @@ class _WaypointTile extends StatelessWidget {
                 settings.updateWaypoint(wp.id, (w) => w.visible = !w.visible),
             tooltip: wp.visible ? 'Hide on map' : 'Show on map',
           ),
+
+          // Delete — always visible, no need to expand
+          IconButton(
+            icon:    Icon(Icons.delete_outline, color: c.red, size: 18),
+            tooltip: 'Delete flag',
+            onPressed: () => settings.removeWaypoint(wp.id),
+          ),
         ],
       ),
       children: [
@@ -233,13 +257,6 @@ class _WaypointTile extends StatelessWidget {
               color: c.textDim,
               c:     c,
               onTap: () => _addChecklistItem(context),
-            ),
-            _ActionChip(
-              icon:  Icons.delete_outline,
-              label: 'Delete',
-              color: c.red,
-              c:     c,
-              onTap: () => settings.removeWaypoint(wp.id),
             ),
           ],
         ),

@@ -38,8 +38,10 @@ class _MapScreenState extends State<MapScreen>
   // Ripple animation.
   late final AnimationController _rippleCtrl;
   late final Animation<double>   _rippleAnim;
-  final List<RippleEvent> _rippleEvents = [];
-  double? _lastFixConfidence;
+  final List<RippleEvent> _rippleEvents  = [];
+  Vec3?    _lastRipplePos;
+  DateTime _lastRippleAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const _kRippleDebounce = Duration(seconds: 2);
 
   // Waypoint placement mode.
   bool _waypointPlacementMode = false;
@@ -58,11 +60,22 @@ class _MapScreenState extends State<MapScreen>
 
   void _onControllerUpdate() {
     final fix = widget.controller.lastFix;
-    final ndt = widget.controller.lastNdtResult;
     if (fix == null) { return; }
-    if (fix.confidence == _lastFixConfidence) { return; }
-    _lastFixConfidence = fix.confidence;
 
+    final now = DateTime.now();
+
+    // Only spawn a ripple when:
+    //  • 2 s have elapsed since the last one, AND
+    //  • the fix position has moved by at least 0.1 m (genuine new solve)
+    final movedEnough = _lastRipplePos == null ||
+        fix.position.distanceTo2d(_lastRipplePos!) > 0.1;
+    if (!movedEnough) { return; }
+    if (now.difference(_lastRippleAt) < _kRippleDebounce) { return; }
+
+    _lastRipplePos = fix.position;
+    _lastRippleAt  = now;
+
+    final ndt = widget.controller.lastNdtResult;
     final double fPeak;
     if (ndt != null) {
       fPeak = switch (ndt.label) {
@@ -74,7 +87,7 @@ class _MapScreenState extends State<MapScreen>
       fPeak = 300.0 + fix.confidence * 4000.0;
     }
 
-    _rippleEvents.removeWhere((e) => e.isExpired(DateTime.now()));
+    _rippleEvents.removeWhere((e) => e.isExpired(now));
     setState(() {
       _rippleEvents.add(RippleEvent(
         position: fix.position,
@@ -146,9 +159,11 @@ class _MapScreenState extends State<MapScreen>
                                 settings.layers.nodes)
                               CustomPaint(
                                 painter: VoxelMapPainter(
-                                  controller: widget.controller,
-                                  camera:     camera,
-                                  colors:     c,
+                                  controller:  widget.controller,
+                                  camera:      camera,
+                                  colors:      c,
+                                  showHeatmap: settings.layers.heatmap,
+                                  showNodes:   settings.layers.nodes,
                                 ),
                                 size: Size.infinite,
                               ),

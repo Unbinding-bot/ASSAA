@@ -54,11 +54,15 @@ class VoxelMapPainter extends CustomPainter {
     required this.controller,
     required this.camera,
     required this.colors,
+    required this.showHeatmap,
+    required this.showNodes,
   }) : super(repaint: camera);
 
   final AppController controller;
   final CameraState   camera;
   final AppColors     colors;
+  final bool          showHeatmap;
+  final bool          showNodes;
 
   AppColors get _c => colors;
 
@@ -77,24 +81,25 @@ class VoxelMapPainter extends CustomPainter {
     _paintGroundGrid(canvas, proj, cx, cy);
 
     // ── 2. Voxel heatmap ─────────────────────────────────────────────────
-    for (final voxel in controller.grid.cells) {
-      // Z-slice filter (used when heatmap layer is on).
-      if (camera.sliceMinZ != null && voxel.center.z < camera.sliceMinZ!) continue;
-      if (camera.sliceMaxZ != null && voxel.center.z > camera.sliceMaxZ!) continue;
-      final tier = tierFor(voxel.confidence);
-      if (tier == ConfidenceTier.green && voxel.confidence < 0.12) continue;
+    if (showHeatmap) {
+      for (final voxel in controller.grid.cells) {
+        if (camera.sliceMinZ != null && voxel.center.z < camera.sliceMinZ!) continue;
+        if (camera.sliceMaxZ != null && voxel.center.z > camera.sliceMaxZ!) continue;
+        final tier = tierFor(voxel.confidence);
+        if (tier == ConfidenceTier.green && voxel.confidence < 0.12) continue;
 
-      final centre = proj(voxel.center);
-      // Radius in pixels — scales with zoom so the heatmap stays the right
-      // physical size regardless of how far the user has zoomed in/out.
-      final r = (controller.grid.cellSize * camera.zoom * kPixelsPerMetre * 0.45)
-          .clamp(2.0, 40.0);
-      canvas.drawCircle(
-        centre,
-        r,
-        Paint()..color = _tierColor(tier)
-            .withValues(alpha: 0.15 + voxel.confidence * 0.55),
-      );
+        final centre = proj(voxel.center);
+        // Half-size of the cell in pixels — fills the grid cell with a small gap.
+        final half = (controller.grid.cellSize * camera.zoom * kPixelsPerMetre * 0.44)
+            .clamp(2.0, 38.0);
+        final rect = Rect.fromCenter(
+            center: centre, width: half * 2, height: half * 2);
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(rect, Radius.circular(half * 0.18)),
+          Paint()..color = _tierColor(tier)
+              .withValues(alpha: 0.18 + voxel.confidence * 0.55),
+        );
+      }
     }
 
     // ── 3. Active-quadrant triangle wireframe ────────────────────────────
@@ -111,10 +116,12 @@ class VoxelMapPainter extends CustomPainter {
     }
 
     // ── 4. Nodes ─────────────────────────────────────────────────────────
-    for (final node in controller.nodes.values) {
-      final isActive = controller.activeQuadrant?.nodes
-          .any((n) => n.id == node.id) ?? false;
-      _paintNode(canvas, node, proj(node.position), isActive: isActive);
+    if (showNodes) {
+      for (final node in controller.nodes.values) {
+        final isActive = controller.activeQuadrant?.nodes
+            .any((n) => n.id == node.id) ?? false;
+        _paintNode(canvas, node, proj(node.position), isActive: isActive);
+      }
     }
 
     // ── 5. TDOA fix ring ─────────────────────────────────────────────────
@@ -140,7 +147,7 @@ class VoxelMapPainter extends CustomPainter {
     }
 
     // ── Empty state ───────────────────────────────────────────────────────
-    if (controller.nodes.isEmpty && fix == null) {
+    if (showNodes && controller.nodes.isEmpty && fix == null) {
       _paintEmptyState(canvas, size);
     }
   }
@@ -367,5 +374,6 @@ class VoxelMapPainter extends CustomPainter {
   };
 
   @override
-  bool shouldRepaint(covariant VoxelMapPainter old) => true;
+  bool shouldRepaint(covariant VoxelMapPainter old) =>
+      old.showHeatmap != showHeatmap || old.showNodes != showNodes || true;
 }

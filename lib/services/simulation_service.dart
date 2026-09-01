@@ -131,7 +131,7 @@ class SimulationService implements DataSource {
       SensorNode(id: 4, position: const Vec3( r, -r, 0.0),  // SE
           role: NodeRole.listener, operatingMode: NodeMode.triangulation,
           ftmCapable: true, battery: 80 + _rng.nextInt(20)),
-      SensorNode(id: 5, position: const Vec3( 0.0,  0.0, 1.5), // gateway
+      SensorNode(id: 5, position: const Vec3( 0.0,  0.0, 0.0), // gateway — sits outside the array
           role: NodeRole.gateway, operatingMode: NodeMode.triangulation,
           ftmCapable: true, battery: 95),
     ];
