@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
+import '../dsp/iir_filter.dart';
 import '../services/data_source.dart';
 import '../theme.dart';
 
@@ -27,15 +28,16 @@ class _ConnectionBarState extends State<ConnectionBar> {
     return StreamBuilder<void>(
       stream: widget.controller.onChange,
       builder: (context, _) {
+        final _c = AppColors.of(context);
         final mode = widget.controller.mode;
         final connStatus = widget.controller.connectionStatus;
         final statusColor = switch (mode) {
-          ConnectionMode.none => AppColors.textDim,
-          ConnectionMode.sim => AppColors.amber,
+          ConnectionMode.none => _c.textDim,
+          ConnectionMode.sim => _c.amber,
           ConnectionMode.live => switch (connStatus) {
-              ConnectionStatus.connected => AppColors.green,
-              ConnectionStatus.connecting || ConnectionStatus.reconnecting => AppColors.amber,
-              ConnectionStatus.error || ConnectionStatus.disconnected => AppColors.red,
+              ConnectionStatus.connected => _c.green,
+              ConnectionStatus.connecting || ConnectionStatus.reconnecting => _c.amber,
+              ConnectionStatus.error || ConnectionStatus.disconnected => _c.red,
             },
         };
         final statusLabel = switch (mode) {
@@ -50,7 +52,7 @@ class _ConnectionBarState extends State<ConnectionBar> {
             },
         };
         return Material(
-          color: AppColors.panel,
+          color: _c.panel,
           child: Column(
             children: [
               InkWell(
@@ -64,13 +66,13 @@ class _ConnectionBarState extends State<ConnectionBar> {
                         size: 10,
                         color: statusColor,
                       ),
-                      const SizedBox(width: 8),
+                      SizedBox(width: 8),
                       Text(
                         statusLabel,
-                        style: const TextStyle(color: AppColors.text, fontWeight: FontWeight.bold, fontSize: 13),
+                        style: TextStyle(color: _c.text, fontWeight: FontWeight.bold, fontSize: 13),
                       ),
                       const Spacer(),
-                      Icon(_expanded ? Icons.expand_less : Icons.expand_more, color: AppColors.textDim),
+                      Icon(_expanded ? Icons.expand_less : Icons.expand_more, color: _c.textDim),
                     ],
                   ),
                 ),
@@ -86,41 +88,41 @@ class _ConnectionBarState extends State<ConnectionBar> {
                           Expanded(
                             child: OutlinedButton(
                               onPressed: () => widget.controller.connectSim(),
-                              child: const Text('Sim'),
+                              child: Text('Sim'),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          SizedBox(width: 8),
                           Expanded(
                             child: TextField(
                               controller: _hostController,
-                              style: const TextStyle(color: AppColors.text, fontSize: 13),
-                              decoration: const InputDecoration(
+                              style: TextStyle(color: _c.text, fontSize: 13),
+                              decoration: InputDecoration(
                                 isDense: true,
                                 labelText: 'Gateway IP',
-                                labelStyle: TextStyle(color: AppColors.textDim, fontSize: 11),
+                                labelStyle: TextStyle(color: _c.textDim, fontSize: 11),
                                 border: OutlineInputBorder(),
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          SizedBox(width: 8),
                           OutlinedButton(
                             onPressed: () {
                               final uri = Uri.parse('ws://${_hostController.text}/ws');
                               widget.controller.connectLive(uri);
                             },
-                            child: const Text('Live'),
+                            child: Text('Live'),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
+                      SizedBox(height: 8),
                       if (mode != ConnectionMode.none)
                         TextButton(
                           onPressed: widget.controller.disconnect,
-                          child: const Text('Disconnect'),
+                          child: Text('Disconnect'),
                         ),
                       Row(
                         children: [
-                          const Text('Wavespeed', style: TextStyle(color: AppColors.textDim, fontSize: 11)),
+                          Text('Wavespeed', style: TextStyle(color: _c.textDim, fontSize: 11)),
                           Expanded(
                             child: Slider(
                               min: 100,
@@ -131,18 +133,18 @@ class _ConnectionBarState extends State<ConnectionBar> {
                             ),
                           ),
                           Text('${widget.controller.wavespeedMps.round()} m/s',
-                              style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
+                              style: TextStyle(color: _c.textDim, fontSize: 11)),
                         ],
                       ),
-                      const Text(
+                      Text(
                         'Propagation speed through rubble is uncertain -- calibrate '
                         'against a known tap distance on your own rig.',
-                        style: TextStyle(color: AppColors.textDim, fontSize: 10),
+                        style: TextStyle(color: _c.textDim, fontSize: 10),
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: 10),
                       Row(
                         children: [
-                          const Text('Tx@1m', style: TextStyle(color: AppColors.textDim, fontSize: 11)),
+                          Text('Tx@1m', style: TextStyle(color: _c.textDim, fontSize: 11)),
                           Expanded(
                             child: Slider(
                               min: -70,
@@ -153,12 +155,12 @@ class _ConnectionBarState extends State<ConnectionBar> {
                             ),
                           ),
                           Text('${widget.controller.rssiTxPowerAt1m.round()}dBm',
-                              style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
+                              style: TextStyle(color: _c.textDim, fontSize: 11)),
                         ],
                       ),
                       Row(
                         children: [
-                          const Text('Path loss', style: TextStyle(color: AppColors.textDim, fontSize: 11)),
+                          Text('Path loss', style: TextStyle(color: _c.textDim, fontSize: 11)),
                           Expanded(
                             child: Slider(
                               min: 2.0,
@@ -169,16 +171,19 @@ class _ConnectionBarState extends State<ConnectionBar> {
                             ),
                           ),
                           Text(widget.controller.rssiPathLossExponent.toStringAsFixed(1),
-                              style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
+                              style: TextStyle(color: _c.textDim, fontSize: 11)),
                         ],
                       ),
-                      const Text(
+                      Text(
                         'RSSI calibration for the "you are here" rescuer fix -- '
                         'Tx@1m is the node\'s signal strength at 1m, path loss is '
                         'how fast it fades through debris. Walk a known distance '
                         'and adjust until the dot lines up.',
-                        style: TextStyle(color: AppColors.textDim, fontSize: 10),
+                        style: TextStyle(color: _c.textDim, fontSize: 10),
                       ),
+                      SizedBox(height: 12),
+                      // ── Custom operator frequency profile ─────────────────
+                      _CustomFilterSection(controller: widget.controller),
                     ],
                   ),
                 ),
@@ -186,6 +191,127 @@ class _ConnectionBarState extends State<ConnectionBar> {
           ),
         );
       },
+    );
+  }
+}
+
+// =============================================================================
+// Custom Operator Frequency Profile  (spec §3.1 fourth row)
+// =============================================================================
+
+class _CustomFilterSection extends StatelessWidget {
+  const _CustomFilterSection({required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final _c = AppColors.of(context);
+    final profile = controller.customFilterProfile;
+    final enabled = controller.useCustomFilterBand;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.tune, size: 14, color: _c.accent),
+            SizedBox(width: 6),
+            Text(
+              'Custom Frequency Profile',
+              style: TextStyle(
+                  color: _c.accent,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold),
+            ),
+            const Spacer(),
+            Switch(
+              value: enabled,
+              activeColor: _c.accent,
+              onChanged: (v) =>
+                  controller.setUseCustomFilterBand(enabled: v),
+            ),
+          ],
+        ),
+        Text(
+          'When enabled, the custom band competes with knock/vocal/metallic '
+          'for best-band selection on every frame.',
+          style: TextStyle(color: _c.textDim, fontSize: 10),
+        ),
+        SizedBox(height: 6),
+        // Centre frequency slider
+        Row(
+          children: [
+            SizedBox(
+              width: 44,
+              child: Text('f₀',
+                  style: TextStyle(color: _c.textDim, fontSize: 11)),
+            ),
+            Expanded(
+              child: Slider(
+                min: CustomFilterProfile.minF0,
+                max: CustomFilterProfile.maxF0,
+                divisions: 199,
+                value: profile.centerHz
+                    .clamp(CustomFilterProfile.minF0, CustomFilterProfile.maxF0),
+                label: '${profile.centerHz.round()} Hz',
+                onChanged: enabled
+                    ? (v) => controller.setCustomFilterProfile(centerHz: v)
+                    : null,
+              ),
+            ),
+            SizedBox(
+              width: 56,
+              child: Text(
+                '${profile.centerHz.round()} Hz',
+                style: TextStyle(color: _c.textDim, fontSize: 11),
+                textAlign: TextAlign.right,
+              ),
+            ),
+          ],
+        ),
+        // Bandwidth slider
+        Row(
+          children: [
+            SizedBox(
+              width: 44,
+              child: Text('Δf',
+                  style: TextStyle(color: _c.textDim, fontSize: 11)),
+            ),
+            Expanded(
+              child: Slider(
+                min: CustomFilterProfile.minBw,
+                max: CustomFilterProfile.maxBw,
+                divisions: 199,
+                value: profile.bandwidthHz
+                    .clamp(CustomFilterProfile.minBw, CustomFilterProfile.maxBw),
+                label: '${profile.bandwidthHz.round()} Hz',
+                onChanged: enabled
+                    ? (v) => controller.setCustomFilterProfile(bandwidthHz: v)
+                    : null,
+              ),
+            ),
+            SizedBox(
+              width: 56,
+              child: Text(
+                '${profile.bandwidthHz.round()} Hz',
+                style: TextStyle(color: _c.textDim, fontSize: 11),
+                textAlign: TextAlign.right,
+              ),
+            ),
+          ],
+        ),
+        // Display effective passband
+        Text(
+          'Passband: ${(profile.centerHz - profile.bandwidthHz / 2).round()}–'
+          '${(profile.centerHz + profile.bandwidthHz / 2).round()} Hz  '
+          '(Q = ${(profile.centerHz / profile.bandwidthHz).toStringAsFixed(1)})',
+          style: TextStyle(
+            color: enabled ? _c.accent : _c.textDim,
+            fontSize: 10,
+          ),
+        ),
+        SizedBox(height: 4),
+      ],
     );
   }
 }

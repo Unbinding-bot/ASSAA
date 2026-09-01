@@ -1,13 +1,17 @@
 import '../ml/feature_vector.dart';
 
+// =============================================================================
+// EventKind
+// =============================================================================
+
 /// What kind of transient a node reported.
-///
-/// NOTE: we no longer classify a continuous breathing/heartbeat band.
-/// Detections are now purely transient: a knock (deliberate, rhythmic,
-/// low-frequency impulse) or a scream (longer, higher-frequency, human
-/// vocal energy). `tapPulse` is the system's own active-mode impactor
-/// firing, which must be excluded from passive localization.
-enum EventKind { knock, scream, tapPulse, unknown }
+/// `tapPulse` is the system's own active-mode impactor firing, which must
+/// be excluded from passive localization.
+enum EventKind { knock, scream, metallic, tapPulse, unknown }
+
+// =============================================================================
+// Passive-mode messages
+// =============================================================================
 
 class DetectionEvent {
   final int nodeId;
@@ -25,6 +29,25 @@ class DetectionEvent {
   });
 }
 
+/// A passive transient reported as raw extracted features rather than a
+/// pre-classified kind. Preferred live protocol: firmware extracts cheap
+/// features onboard but leaves classification to the phone's model.
+class RawDetectionSample {
+  final int nodeId;
+  final double timestampMs;
+  final SignalFeatures features;
+
+  const RawDetectionSample({
+    required this.nodeId,
+    required this.timestampMs,
+    required this.features,
+  });
+}
+
+// =============================================================================
+// Active-mode messages  (Mode 1 — MPU-6050 tap capture)
+// =============================================================================
+
 /// One active-mode tap cycle: the tapper fired, and some subset of
 /// listener nodes reported a travel time back.
 class TapCycle {
@@ -39,26 +62,96 @@ class TapCycle {
   });
 }
 
-/// A passive transient reported as raw extracted features rather than a
-/// pre-classified kind. This is the preferred live protocol: the ESP32
-/// extracts cheap signal features onboard (FFT band energies, duration,
-/// zero-crossing rate -- see ml/feature_vector.dart) but leaves the actual
-/// "is this a person" judgment to the phone's model, since that's the
-/// part meant to improve over time without reflashing firmware.
-class RawDetectionSample {
+/// Raw MPU-6050 tap-capture data streamed from a single ESP32-C3 node
+/// (firmware `TAP_DATA` WebSocket message, doc §3.1).
+///
+/// The gateway relays this JSON payload verbatim; AppController assembles
+/// per-tapper [TapCycle]s by collating arrivals across nodes.
+class TapData {
+  /// Node that sent this accel frame (set by gateway from connection context).
   final int nodeId;
-  final double timestampMs;
-  final SignalFeatures features;
 
-  const RawDetectionSample({
+  /// Hardware µs timestamp of the piezo trigger interrupt on the sender.
+  final int piezoT0Us;
+
+  /// 150 raw Z-axis acceleration samples at 500 Hz (int16, ±2g full scale).
+  final List<int> samplesZ;
+
+  const TapData({
     required this.nodeId,
-    required this.timestampMs,
-    required this.features,
+    required this.piezoT0Us,
+    required this.samplesZ,
   });
+
+  factory TapData.fromJson(int nodeId, Map<String, dynamic> json) {
+    return TapData(
+      nodeId: nodeId,
+      piezoT0Us: (json['piezo_t0'] as num).toInt(),
+      samplesZ: (json['samples'] as List).cast<int>(),
+    );
+  }
+
+  /// Convert raw int16 samples to normalised doubles (±1.0, 16384 LSB/g).
+  List<double> get normalisedSamples =>
+      samplesZ.map((s) => s / 16384.0).toList();
+
+  /// First-arrival time (ms after piezo trigger) using a 10%-of-peak
+  /// threshold — matches AccelFrame.travelTimeMs() in udp_audio_receiver.dart.
+  double? firstArrivalMs() {
+    final norm = normalisedSamples;
+    if (norm.isEmpty) return null;
+    final peak = norm.map((v) => v.abs()).reduce((a, b) => a > b ? a : b);
+    final thresh = peak * 0.10;
+    const intervalUs = 2000; // 500 Hz → 2000 µs per sample
+    for (var i = 0; i < norm.length; i++) {
+      if (norm[i].abs() >= thresh) return (i * intervalUs) / 1000.0;
+    }
+    return null;
+  }
 }
 
-/// Heartbeat reply from the gateway, used only to confirm the connection
-/// is alive (see services/esp32_connection.dart). Never reaches the UI.
+// =============================================================================
+// FTM calibration messages
+// =============================================================================
+
+/// One Wi-Fi FTM burst result relayed by the gateway.  The firmware runs
+/// the FTM initiator role and sends the four timestamps back so the phone
+/// can compute the distance (doc §5.1).
+class FtmMeasurement {
+  final int initiatorId; // node that initiated the FTM exchange
+  final int responderId; // node that responded
+  final int t1Ns; // frame departure  (initiator, ns)
+  final int t2Ns; // frame arrival    (responder, ns)
+  final int t3Ns; // ACK departure    (responder, ns)
+  final int t4Ns; // ACK arrival      (initiator, ns)
+
+  const FtmMeasurement({
+    required this.initiatorId,
+    required this.responderId,
+    required this.t1Ns,
+    required this.t2Ns,
+    required this.t3Ns,
+    required this.t4Ns,
+  });
+
+  factory FtmMeasurement.fromJson(Map<String, dynamic> json) {
+    return FtmMeasurement(
+      initiatorId: json['initiator'] as int,
+      responderId: json['responder'] as int,
+      t1Ns: (json['t1'] as num).toInt(),
+      t2Ns: (json['t2'] as num).toInt(),
+      t3Ns: (json['t3'] as num).toInt(),
+      t4Ns: (json['t4'] as num).toInt(),
+    );
+  }
+}
+
+// =============================================================================
+// Heartbeat / internal
+// =============================================================================
+
+/// Heartbeat reply from the gateway — confirms connection is alive.
+/// Never reaches the UI.
 class GatewayPong {
   const GatewayPong();
 }

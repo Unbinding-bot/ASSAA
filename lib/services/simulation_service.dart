@@ -6,208 +6,339 @@ import '../ml/feature_vector.dart';
 import '../models/event.dart';
 import '../models/node.dart';
 import '../models/rescuer.dart';
+import '../services/udp_audio_receiver.dart';
 import 'data_source.dart';
 
-/// Generates a synthetic scenario: a scatter of nodes thrown into a
-/// rubble-pile-sized bounding box, with one hidden "survivor" location
-/// the algorithm has to find -- not shown anywhere in the UI, only used
-/// to bias the synthetic physics, so running Sim mode is an honest test
-/// of whether the TDOA/tomography pipeline actually converges on it.
+/// 5-node array layout matching the architecture spec:
+///
+///   Node 1 (NW) ─────── Node 2 (NE)
+///        │          ╲  ╱          │
+///        │      Node 0 (centre)   │
+///        │          ╱  ╲          │
+///   Node 3 (SW) ─────── Node 4 (SE)
+///   Node 5 = gateway (elevated, outside the slab)
+///
+/// Any impact excites a local 3-node triangle.  Nodes on the opposite side
+/// of the slab arrive 20–50 ms later — the quadrant selector will drop them
+/// automatically, giving the pipeline something real to test against.
+///
+/// Hidden "anomaly" regions:
+///   _voidPos      — air void (slow ToF, low f_peak, large echo)
+///   _delamPos     — delamination crack (moderate ToF, medium echo)
+///   (rest of slab — solid concrete, fast ToF, high f_peak, small echo)
 class SimulationService implements DataSource {
-  SimulationService({int nodeCount = 7, int? seed})
-      : _rng = math.Random(seed);
+  SimulationService({int? seed}) : _rng = math.Random(seed ?? 42);
 
   final math.Random _rng;
   final _controller = StreamController<Object>.broadcast();
+
+  Timer? _audioTimer;
   Timer? _tapTimer;
-  Timer? _passiveTimer;
   Timer? _telemetryTimer;
   Timer? _rescuerTimer;
 
   late List<SensorNode> _nodes;
-  late Vec3 _survivor;
+  late Vec3 _voidPos;
+  late Vec3 _delamPos;
   double _rescuerAngle = 0.0;
-  static const double _wavespeedMps = 300.0; // rough rubble default
+
+  int _hwClockUs = 0;
+  static const int    _frameUs         = 100 * 100; // 100 samples @ 10 kHz = 10 ms
+  static const double _wavespeedMps    = 3400.0;    // concrete ~3400 m/s
+  static const double _sampleRateHz    = 10000.0;
+  static const int    _samplesPerFrame = 100;
 
   @override
   Stream<Object> get messages => _controller.stream;
 
   @override
-  Stream<ConnectionStatus> get status => Stream.value(ConnectionStatus.connected);
+  Stream<ConnectionStatus> get status =>
+      Stream.value(ConnectionStatus.connected);
 
   @override
   Future<void> start() async {
-    _nodes = _scatterNodes(7);
-    _survivor = Vec3(
-      _rand(-3.5, 3.5),
-      _rand(-3.5, 3.5),
-      _rand(-1.5, 0.5), // depth: negative-ish = buried
-    );
+    _nodes = _buildArray();
 
-    for (final n in _nodes) {
-      _controller.add(n);
-    }
+    // Anomaly positions — not revealed to the UI, only affect physics.
+    _voidPos  = const Vec3( 2.5,  2.5, 0.0); // NE quadrant
+    _delamPos = const Vec3(-2.0, -2.0, 0.0); // SW quadrant
 
-    // Telemetry heartbeat: battery/RSSI drift, so the node panel has
-    // something to show even between events.
+    for (final n in _nodes) { _controller.add(n); }
+
+    _emitFtmBursts();
+
+    // Mode 2: piezo audio frames at 10 ms intervals per node.
+    _audioTimer = Timer.periodic(const Duration(milliseconds: 10), (_) {
+      _hwClockUs += _frameUs;
+      _emitAudioFrames();
+    });
+
+    // Mode 1: tap cycles every 6 s, rotating tapper through outer nodes.
+    var tapIdx = 0;
+    _tapTimer = Timer.periodic(const Duration(seconds: 6), (_) {
+      // Only outer nodes (1–4) tap; centre node (0) and gateway (5) don't.
+      final outerNodes = _nodes.where((n) => n.id >= 1 && n.id <= 4).toList();
+      final tapper = outerNodes[tapIdx % outerNodes.length];
+      tapIdx++;
+      _controller.add(_synthesizeTapCycle(tapper));
+      if (_rng.nextDouble() < 0.5) { _emitLegacyCluster(); }
+    });
+
     _telemetryTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       for (final n in _nodes) {
-        n.battery = (n.battery - (_rng.nextDouble() * 0.3)).clamp(0, 100).toInt();
-        n.rssi = -40 - _rng.nextInt(30);
+        n.battery  = (n.battery - (_rng.nextDouble() * 0.3)).clamp(0, 100).toInt();
+        n.rssi     = -40 - _rng.nextInt(30);
         n.lastSeen = DateTime.now();
         _controller.add(n);
       }
     });
 
-    // Active mode: rotate the tapper every ~5s, matching the design doc's
-    // full-tomographic-coverage rotation.
-    var tapperIndex = 0;
-    _tapTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      final tapper = _nodes[tapperIndex % _nodes.length];
-      tapperIndex++;
-      _controller.add(_synthesizeTapCycle(tapper));
-    });
-
-    // Passive mode: occasional knock/scream bursts, weighted toward nodes
-    // near the hidden survivor location (more likely to be heard clearly
-    // there), plus rare background false-positive noise elsewhere.
-    _passiveTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      if (_rng.nextDouble() < 0.55) {
-        _emitPassiveCluster();
-      }
-    });
-
-    // Rescuer walk: the phone-carrier orbits the pile's perimeter, and
-    // each node passively reports how strongly it hears the phone from
-    // wherever it currently stands. This is what the "you are here" dot
-    // trilaterates from.
     _rescuerTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
       _rescuerAngle += 0.15;
-      final radius = 5.0 + math.sin(_rescuerAngle * 0.3);
-      final rescuerPos = Vec3(
-        math.cos(_rescuerAngle) * radius,
-        math.sin(_rescuerAngle) * radius,
-        1.4, // roughly chest/hand height above the debris surface
-      );
+      final r = 5.0 + math.sin(_rescuerAngle * 0.3);
+      final rPos = Vec3(math.cos(_rescuerAngle) * r,
+                        math.sin(_rescuerAngle) * r, 1.4);
       for (final node in _nodes) {
-        final distM = node.position.distanceTo(rescuerPos);
-        if (distM > 12.0) continue; // out of WiFi range
-        // Inverse log-distance path loss plus noise, matching the model
-        // rssi_localization.dart expects to invert.
-        const txPowerAt1m = -40.0;
-        const pathLossExponent = 3.0;
-        final dbm = txPowerAt1m - 10 * pathLossExponent * (math.log(distM.clamp(0.3, 100)) / math.ln10) + _rand(-3, 3);
+        final d = node.position.distanceTo(rPos);
+        if (d > 12.0) { continue; }
+        const tx = -40.0, n = 3.0;
+        final dbm = tx - 10 * n * (math.log(d.clamp(0.3, 100)) / math.ln10)
+            + _rand(-3, 3);
         _controller.add(RescuerRssiSample(nodeId: node.id, dbm: dbm));
       }
     });
   }
 
-  List<SensorNode> _scatterNodes(int count) {
-    final nodes = <SensorNode>[];
-    nodes.add(SensorNode(
-      id: 0,
-      position: const Vec3(0, 0, 1.5), // gateway sits up top
-      role: NodeRole.gateway,
-      battery: 95,
-    ));
-    for (var i = 1; i <= count; i++) {
-      nodes.add(SensorNode(
-        id: i,
-        position: Vec3(_rand(-4, 4), _rand(-4, 4), _rand(-2, 1)),
-        role: NodeRole.listener,
-        battery: 70 + _rng.nextInt(30),
+  // ---------------------------------------------------------------------------
+  // 5-node array layout
+  // ---------------------------------------------------------------------------
+
+  List<SensorNode> _buildArray() {
+    const r = 3.5; // radius of outer square (half-side)
+    return [
+      SensorNode(id: 0, position: const Vec3( 0.0,  0.0, 0.0),
+          role: NodeRole.listener, operatingMode: NodeMode.triangulation,
+          ftmCapable: true, battery: 90),
+      SensorNode(id: 1, position: const Vec3(-r,  r, 0.0),  // NW
+          role: NodeRole.listener, operatingMode: NodeMode.triangulation,
+          ftmCapable: true, battery: 80 + _rng.nextInt(20)),
+      SensorNode(id: 2, position: const Vec3( r,  r, 0.0),  // NE
+          role: NodeRole.listener, operatingMode: NodeMode.triangulation,
+          ftmCapable: true, battery: 80 + _rng.nextInt(20)),
+      SensorNode(id: 3, position: const Vec3(-r, -r, 0.0),  // SW
+          role: NodeRole.listener, operatingMode: NodeMode.triangulation,
+          ftmCapable: true, battery: 80 + _rng.nextInt(20)),
+      SensorNode(id: 4, position: const Vec3( r, -r, 0.0),  // SE
+          role: NodeRole.listener, operatingMode: NodeMode.triangulation,
+          ftmCapable: true, battery: 80 + _rng.nextInt(20)),
+      SensorNode(id: 5, position: const Vec3( 0.0,  0.0, 1.5), // gateway
+          role: NodeRole.gateway, operatingMode: NodeMode.triangulation,
+          ftmCapable: true, battery: 95),
+    ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mode 2: piezo audio frame synthesis
+  // ---------------------------------------------------------------------------
+
+  bool   _eventActive          = false;
+  int    _eventRemainingFrames = 0;
+  late Vec3   _eventSource;
+  late String _eventType;
+  final Map<int, double> _phaseAcc = {};
+
+  void _emitAudioFrames() {
+    if (!_eventActive && _rng.nextDouble() < 0.012) {
+      _eventActive = true;
+      // Bias source toward one of the anomaly regions for realism.
+      final pick = _rng.nextDouble();
+      _eventSource = pick < 0.35 ? _voidPos
+          : pick < 0.55 ? _delamPos
+          : Vec3(_rand(-3, 3), _rand(-3, 3), 0.0);
+      _eventType = ['knock', 'knock', 'metallic'][_rng.nextInt(3)];
+      _eventRemainingFrames = switch (_eventType) {
+        'knock'    => 3 + _rng.nextInt(4),
+        'metallic' => 2 + _rng.nextInt(3),
+        _          => 5,
+      };
+    }
+
+    for (final node in _nodes) {
+      if (node.role == NodeRole.gateway) { continue; }
+
+      List<double> samples;
+      if (_eventActive) {
+        final distM     = node.position.distanceTo(_eventSource);
+        final delayUs   = (distM / (_wavespeedMps / 1e6)).round();
+        samples = _synthesizeEventFrame(node.id, _eventType,
+            amplitude: _rand(0.3, 0.85),
+            frameTimestampUs: _hwClockUs + delayUs);
+      } else {
+        samples = _synthesizeNoiseFrame(node.id);
+      }
+
+      _controller.add(AudioFrame(
+        nodeId:      node.id,
+        timestampUs: _hwClockUs,
+        samples:     samples,
       ));
     }
-    return nodes;
+
+    if (_eventActive) {
+      _eventRemainingFrames--;
+      if (_eventRemainingFrames <= 0) { _eventActive = false; }
+    }
   }
+
+  /// Synthesise a decaying sinusoid in the NDT frequency band.
+  /// Adds propagation-delay-based phase offset so GCC-PHAT gets a real peak.
+  List<double> _synthesizeEventFrame(int nodeId, String type,
+      {required double amplitude, required int frameTimestampUs}) {
+    final freqHz = switch (type) {
+      'knock'    =>  500.0,
+      'metallic' => 4000.0,
+      _          =>  500.0,
+    };
+    final decay = switch (type) {
+      'knock'    => 0.982,
+      'metallic' => 0.970,
+      _          => 0.985,
+    };
+
+    final phase = _phaseAcc[nodeId] ?? 0.0;
+    final omega = 2 * math.pi * freqHz / _sampleRateHz;
+    final samples = List<double>.filled(_samplesPerFrame, 0.0);
+    var env = amplitude;
+    var ph  = phase;
+    for (var i = 0; i < _samplesPerFrame; i++) {
+      samples[i] = env * math.sin(ph) + _rand(-0.008, 0.008);
+      ph  += omega;
+      env *= decay;
+    }
+    _phaseAcc[nodeId] = ph % (2 * math.pi);
+    return samples;
+  }
+
+  List<double> _synthesizeNoiseFrame(int nodeId) =>
+      List<double>.generate(_samplesPerFrame, (_) => _rand(-0.01, 0.01));
+
+  // ---------------------------------------------------------------------------
+  // Mode 1: tap cycle synthesis with realistic NDT waveforms
+  // ---------------------------------------------------------------------------
 
   TapCycle _synthesizeTapCycle(SensorNode tapper) {
     final arrivals = <int, double>{};
+
     for (final listener in _nodes) {
-      if (listener.id == tapper.id) continue;
-      final distM = tapper.position.distanceTo(listener.position);
-      var travelMs = (distM / _wavespeedMps) * 1000;
-
-      // If the ray passes near the hidden survivor, add a slowdown --
-      // this is what the tomography back-projection should pick up.
-      final perpDist =
-          _survivor.distanceToSegment(tapper.position, listener.position);
-      if (perpDist < 1.0) {
-        travelMs *= 1.25 + _rng.nextDouble() * 0.15;
+      if (listener.id == tapper.id || listener.role == NodeRole.gateway) {
+        continue;
       }
-      // Measurement noise
-      travelMs += _rand(-0.4, 0.4);
+      final distM = tapper.position.distanceTo(listener.position);
 
-      if (_rng.nextDouble() < 0.85) {
-        // not every listener reliably hears every tap through rubble
-        arrivals[listener.id] = travelMs.clamp(0.1, double.infinity).toDouble();
+      // Determine material between tapper and listener.
+      final midpoint = Vec3(
+        (tapper.position.x + listener.position.x) / 2,
+        (tapper.position.y + listener.position.y) / 2,
+        0.0,
+      );
+      final toVoid  = midpoint.distanceTo(_voidPos);
+      final toDelam = midpoint.distanceTo(_delamPos);
+
+      double effectiveVelocity;
+      if (toVoid < 1.5) {
+        effectiveVelocity = _wavespeedMps * _rand(0.45, 0.58); // ~1800 m/s
+      } else if (toDelam < 1.5) {
+        effectiveVelocity = _wavespeedMps * _rand(0.72, 0.82); // ~2700 m/s
+      } else {
+        effectiveVelocity = _wavespeedMps * _rand(0.93, 1.05); // ~3200–3600
+      }
+
+      var travelMs = (distM / effectiveVelocity) * 1000.0 + _rand(-0.2, 0.2);
+
+      if (_rng.nextDouble() < 0.88) {
+        arrivals[listener.id] =
+            travelMs.clamp(0.05, double.infinity).toDouble();
       }
     }
+
     return TapCycle(
       tapperId: tapper.id,
       arrivalMs: arrivals,
-      firedAt: DateTime.now(),
+      firedAt:  DateTime.now(),
     );
   }
 
-  void _emitPassiveCluster() {
-    final isReal = _rng.nextDouble() < 0.7; // vs. background noise
-    final isKnock = _rng.nextBool();
-    final sourcePos = isReal
-        ? _survivor
-        : Vec3(_rand(-4, 4), _rand(-4, 4), _rand(-2, 1));
+  // ---------------------------------------------------------------------------
+  // FTM bursts
+  // ---------------------------------------------------------------------------
 
-    // Only nodes within plausible range hear it; each hears it at a
-    // different time based on distance -- this delay spread is exactly
-    // what the TDOA solver needs.
+  void _emitFtmBursts() {
+    const burstCount = 5;
+    const c = 299792458.0;
+
+    for (var i = 0; i < _nodes.length; i++) {
+      for (var j = i + 1; j < _nodes.length; j++) {
+        final a = _nodes[i];
+        final b = _nodes[j];
+        final distM   = a.position.distanceTo(b.position);
+        final jitterNs = _rng.nextInt(3) - 1;
+
+        const t1 = 100000000;
+        final oneWayNs = (distM / c * 1e9).round();
+        final t2 = t1 + oneWayNs + jitterNs;
+        final t3 = t2 + 50000;
+        final t4 = t3 + oneWayNs + jitterNs;
+
+        for (var k = 0; k < burstCount; k++) {
+          _controller.add(FtmMeasurement(
+            initiatorId: a.id, responderId: b.id,
+            t1Ns: t1, t2Ns: t2, t3Ns: t3, t4Ns: t4,
+          ));
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Legacy RawDetectionSample path (exercises the DetectionEvent pipeline)
+  // ---------------------------------------------------------------------------
+
+  void _emitLegacyCluster() {
+    final isKnock   = _rng.nextBool();
+    // Bias source toward an anomaly so quadrant selection has something to find.
+    final sourcePos = _rng.nextDouble() < 0.6 ? _voidPos : _delamPos;
     const baseT = 0.0;
-    for (final node in _nodes) {
-      if (node.role == NodeRole.gateway) continue;
-      final distM = node.position.distanceTo(sourcePos);
-      if (distM > 10.0) continue;
-      if (_rng.nextDouble() > 0.8) continue; // dropped packet / not heard
-      final delayMs = baseT + (distM / _wavespeedMps) * 1000 + _rand(-3, 3);
 
-      // Synthesize features a real person-presence model would plausibly
-      // see: a genuine knock/scream near the survivor gets clean,
-      // characteristic band energy; background noise gets messier,
-      // broadband, noisier features -- this is what actually exercises
-      // ModelManager.personModel end-to-end in Sim mode, rather than
-      // just hardcoding a confidence number.
-      final features = isReal
-          ? (isKnock
-              ? SignalFeatures(
-                  durationMs: _rand(40, 130),
-                  lowBandEnergy: _rand(0.6, 0.9),
-                  midBandEnergy: _rand(0.05, 0.15),
-                  vocalBandEnergy: _rand(0.0, 0.1),
-                  spectralCentroidHz: _rand(60, 140),
-                  zeroCrossingRate: _rand(20, 80),
-                  peakAmplitude: _rand(0.5, 1.0),
-                )
-              : SignalFeatures(
-                  durationMs: _rand(220, 500),
-                  lowBandEnergy: _rand(0.05, 0.15),
-                  midBandEnergy: _rand(0.1, 0.2),
-                  vocalBandEnergy: _rand(0.4, 0.7),
-                  spectralCentroidHz: _rand(500, 1800),
-                  zeroCrossingRate: _rand(150, 350),
-                  peakAmplitude: _rand(0.5, 1.0),
-                ))
+    for (final node in _nodes) {
+      if (node.role == NodeRole.gateway) { continue; }
+      final distM = node.position.distanceTo(sourcePos);
+      if (distM > 8.0 || _rng.nextDouble() > 0.82) { continue; }
+      final delayMs = baseT + (distM / (_wavespeedMps / 1000)) + _rand(-1, 1);
+
+      final features = isKnock
+          ? SignalFeatures(
+              durationMs: _rand(40, 120),
+              lowBandEnergy: _rand(0.55, 0.85),
+              midBandEnergy: _rand(0.05, 0.15),
+              vocalBandEnergy: _rand(0.0, 0.08),
+              spectralCentroidHz: _rand(80, 200),
+              zeroCrossingRate: _rand(15, 60),
+              peakAmplitude: _rand(0.4, 0.9),
+            )
           : SignalFeatures(
-              durationMs: _rand(30, 400),
-              lowBandEnergy: _rand(0.2, 0.4),
-              midBandEnergy: _rand(0.2, 0.4),
-              vocalBandEnergy: _rand(0.1, 0.3),
-              spectralCentroidHz: _rand(200, 900),
-              zeroCrossingRate: _rand(350, 600), // messier, less periodic
-              peakAmplitude: _rand(0.2, 0.5),
+              durationMs: _rand(20, 80),
+              lowBandEnergy: _rand(0.2, 0.45),
+              midBandEnergy: _rand(0.25, 0.45),
+              vocalBandEnergy: _rand(0.05, 0.15),
+              spectralCentroidHz: _rand(800, 3000),
+              zeroCrossingRate: _rand(80, 250),
+              peakAmplitude: _rand(0.3, 0.8),
             );
 
       _controller.add(RawDetectionSample(
-        nodeId: node.id,
+        nodeId:      node.id,
         timestampMs: delayMs,
-        features: features,
+        features:    features,
       ));
     }
   }
@@ -216,10 +347,10 @@ class SimulationService implements DataSource {
 
   @override
   void stop() {
+    _audioTimer?.cancel();
     _tapTimer?.cancel();
-    _passiveTimer?.cancel();
     _telemetryTimer?.cancel();
     _rescuerTimer?.cancel();
-    _controller.close();
+    if (!_controller.isClosed) { _controller.close(); }
   }
 }

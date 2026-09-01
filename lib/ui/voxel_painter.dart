@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
@@ -39,10 +41,15 @@ class VoxelMapPainter extends CustomPainter {
   VoxelMapPainter({
     required this.controller,
     required this.camera,
+    required this.colors,
   }) : super(repaint: camera);
 
   final AppController controller;
-  final CameraState camera;
+  final CameraState   camera;
+  final AppColors     colors;
+
+  // Convenience getter so paint methods stay readable.
+  AppColors get _c => colors;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -84,9 +91,12 @@ class VoxelMapPainter extends CustomPainter {
     for (final node in controller.nodes.values) {
       final p = project(node.position, yaw: yaw, pitch: pitch, zoom: camera.zoom, cx: cx, cy: cy);
       if (p == null) continue;
+      // Check if this node is part of the active quadrant triangle.
+      final isActive = controller.activeQuadrant?.nodes
+          .any((n) => n.id == node.id) ?? false;
       drawables.add(_Drawable(
-        depth: p.depth - 1000, // nodes render in front of voxels at similar depth
-        paint: (canvas) => _paintNode(canvas, node, p),
+        depth: p.depth - 1000,
+        paint: (canvas) => _paintNode(canvas, node, p, isActive: isActive),
       ));
     }
 
@@ -102,11 +112,38 @@ class VoxelMapPainter extends CustomPainter {
               Offset(p.screenX, p.screenY),
               14,
               Paint()
-                ..color = AppColors.accent.withValues(alpha: 0.9)
+                ..color = _c.accent.withValues(alpha: 0.9)
                 ..style = PaintingStyle.stroke
                 ..strokeWidth = 2,
             );
           },
+        ));
+      }
+    }
+
+    // NDT classification result badge near the TDOA fix.
+    final ndt = controller.lastNdtResult;
+    if (ndt != null && fix != null) {
+      final p = project(fix.position, yaw: yaw, pitch: pitch, zoom: camera.zoom, cx: cx, cy: cy);
+      if (p != null) {
+        drawables.add(_Drawable(
+          depth: p.depth - 2500,
+          paint: (canvas) => _paintNdtBadge(canvas, ndt, p),
+        ));
+      }
+    }
+
+    // Active quadrant triangle wireframe.
+    final quadrant = controller.activeQuadrant;
+    if (quadrant != null && quadrant.nodes.length == 3) {
+      final pts = <Projected?>[];
+      for (final n in quadrant.nodes) {
+        pts.add(project(n.position, yaw: yaw, pitch: pitch, zoom: camera.zoom, cx: cx, cy: cy));
+      }
+      if (pts.every((p) => p != null)) {
+        drawables.add(_Drawable(
+          depth: pts.first!.depth - 500,
+          paint: (canvas) => _paintTriangle(canvas, pts.cast<Projected>()),
         ));
       }
     }
@@ -141,7 +178,7 @@ class VoxelMapPainter extends CustomPainter {
     final yMin = grid.origin.y, yMax = grid.origin.y + grid.ny * grid.cellSize;
 
     final linePaint = Paint()
-      ..color = AppColors.panelBorder.withValues(alpha: 0.9)
+      ..color = _c.panelBorder.withValues(alpha: 0.9)
       ..strokeWidth = 1;
 
     Offset? proj(Vec3 v) {
@@ -172,7 +209,7 @@ class VoxelMapPainter extends CustomPainter {
       final tp = TextPainter(
         text: TextSpan(
           text: '${(x).toStringAsFixed(0)}m',
-          style: const TextStyle(color: AppColors.textDim, fontSize: 9),
+          style: TextStyle(color: _c.textDim, fontSize: 9),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
@@ -187,7 +224,7 @@ class VoxelMapPainter extends CustomPainter {
     final z0 = grid.origin.z, z1 = grid.origin.z + grid.nz * grid.cellSize;
 
     final paint = Paint()
-      ..color = AppColors.panelBorder.withValues(alpha: 0.7)
+      ..color = _c.panelBorder.withValues(alpha: 0.7)
       ..strokeWidth = 1;
 
     Offset? proj(Vec3 v) {
@@ -224,14 +261,14 @@ class VoxelMapPainter extends CustomPainter {
       Offset(p.screenX, p.screenY),
       ringRadius,
       Paint()
-        ..color = AppColors.accent.withValues(alpha: 0.15)
+        ..color = _c.accent.withValues(alpha: 0.15)
         ..style = PaintingStyle.fill,
     );
     canvas.drawCircle(
       Offset(p.screenX, p.screenY),
       ringRadius,
       Paint()
-        ..color = AppColors.accent.withValues(alpha: 0.5)
+        ..color = _c.accent.withValues(alpha: 0.5)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.2,
     );
@@ -244,11 +281,11 @@ class VoxelMapPainter extends CustomPainter {
       ..lineTo(p.screenX, p.screenY + 9)
       ..lineTo(p.screenX - 7, p.screenY)
       ..close();
-    canvas.drawPath(path, Paint()..color = AppColors.accent);
+    canvas.drawPath(path, Paint()..color = _c.accent);
     canvas.drawPath(
       path,
       Paint()
-        ..color = AppColors.bg
+        ..color = _c.bg
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5,
     );
@@ -256,26 +293,39 @@ class VoxelMapPainter extends CustomPainter {
     final tp = TextPainter(
       text: TextSpan(
         text: 'YOU (\u00b1${rescuer.accuracyM.toStringAsFixed(1)}m)',
-        style: const TextStyle(color: AppColors.accent, fontSize: 10, fontWeight: FontWeight.bold),
+        style: TextStyle(color: _c.accent, fontSize: 10, fontWeight: FontWeight.bold),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
     tp.paint(canvas, Offset(p.screenX + 10, p.screenY - 6));
   }
 
-  void _paintNode(Canvas canvas, SensorNode node, Projected p) {
+  void _paintNode(Canvas canvas, SensorNode node, Projected p, {bool isActive = false}) {
     Color color;
     switch (node.role) {
       case NodeRole.gateway:
-        color = AppColors.accent;
+        color = _c.accent;
         break;
       case NodeRole.tapper:
-        color = AppColors.amber;
+        color = _c.amber;
         break;
       case NodeRole.listener:
-        color = node.isStale ? AppColors.textDim : AppColors.text;
+        color = node.isStale ? _c.textDim : _c.text;
         break;
     }
+
+    // Active quadrant nodes get a highlighted outer ring.
+    if (isActive) {
+      canvas.drawCircle(
+        Offset(p.screenX, p.screenY),
+        11,
+        Paint()
+          ..color = _c.amber.withValues(alpha: 0.75)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.5,
+      );
+    }
+
     canvas.drawCircle(Offset(p.screenX, p.screenY), 5, Paint()..color = color);
     canvas.drawCircle(
       Offset(p.screenX, p.screenY),
@@ -288,18 +338,108 @@ class VoxelMapPainter extends CustomPainter {
     final tp = TextPainter(
       text: TextSpan(
         text: '${node.id}',
-        style: const TextStyle(color: AppColors.textDim, fontSize: 10),
+        style: TextStyle(
+          color: isActive ? _c.amber : _c.textDim,
+          fontSize: 10,
+          fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+        ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
     tp.paint(canvas, Offset(p.screenX + 8, p.screenY - 6));
   }
 
-  void _paintEmptyState(Canvas canvas, Size size) {
+  /// Draws a dashed triangle connecting the 3 active quadrant nodes.
+  void _paintTriangle(Canvas canvas, List<Projected> pts) {
+    final paint = Paint()
+      ..color = _c.amber.withValues(alpha: 0.45)
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+
+    for (var i = 0; i < 3; i++) {
+      final a = Offset(pts[i].screenX, pts[i].screenY);
+      final b = Offset(pts[(i + 1) % 3].screenX, pts[(i + 1) % 3].screenY);
+      _drawDashedLine(canvas, a, b, paint);
+    }
+  }
+
+  void _drawDashedLine(Canvas canvas, Offset a, Offset b, Paint paint) {
+    const dashLen = 6.0, gapLen = 4.0;
+    final dx = b.dx - a.dx, dy = b.dy - a.dy;
+    final total = math.sqrt(dx * dx + dy * dy);
+    if (total < 1) { return; }
+    final ux = dx / total, uy = dy / total;
+    var dist = 0.0;
+    var drawing = true;
+    while (dist < total) {
+      final segLen = drawing ? dashLen : gapLen;
+      final end = math.min(dist + segLen, total);
+      if (drawing) {
+        canvas.drawLine(
+          Offset(a.dx + ux * dist, a.dy + uy * dist),
+          Offset(a.dx + ux * end,  a.dy + uy * end),
+          paint,
+        );
+      }
+      dist += segLen;
+      drawing = !drawing;
+    }
+  }
+
+  /// Draws the NDT classification badge (SOLID / DELAMINATION / VOID)
+  /// offset slightly above the TDOA fix ring.
+  void _paintNdtBadge(Canvas canvas, NdtResult ndt, Projected p) {
+    final color = switch (ndt.label) {
+      NdtLabel.solid        => _c.green,
+      NdtLabel.delamination => _c.amber,
+      NdtLabel.voidRegion   => _c.red,
+    };
+
+    final label = '${ndt.displayLabel} '
+        '${(ndt.confidence * 100).toStringAsFixed(0)}%';
+
     final tp = TextPainter(
-      text: const TextSpan(
+      text: TextSpan(
+        text: label,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.5,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    // Background pill
+    const pad = 5.0;
+    final rect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        p.screenX - tp.width / 2 - pad,
+        p.screenY - 32 - tp.height - pad,
+        tp.width + pad * 2,
+        tp.height + pad * 2,
+      ),
+      const Radius.circular(4),
+    );
+    canvas.drawRRect(
+      rect,
+      Paint()..color = _c.panel.withValues(alpha: 0.88),
+    );
+    canvas.drawRRect(
+      rect,
+      Paint()
+        ..color = color.withValues(alpha: 0.7)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+    tp.paint(canvas, Offset(p.screenX - tp.width / 2, p.screenY - 32 - tp.height));
+  }
+
+  void _paintEmptyState(Canvas canvas, Size size) {    final tp = TextPainter(
+      text: TextSpan(
         text: 'No nodes yet.\nConnect or start simulation.',
-        style: TextStyle(color: AppColors.textDim, fontSize: 13),
+        style: TextStyle(color: _c.textDim, fontSize: 13),
       ),
       textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
@@ -310,11 +450,11 @@ class VoxelMapPainter extends CustomPainter {
   Color _tierColor(ConfidenceTier t) {
     switch (t) {
       case ConfidenceTier.red:
-        return AppColors.red;
+        return _c.red;
       case ConfidenceTier.yellow:
-        return AppColors.amber;
+        return _c.amber;
       case ConfidenceTier.green:
-        return AppColors.green;
+        return _c.green;
     }
   }
 
