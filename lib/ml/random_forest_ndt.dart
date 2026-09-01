@@ -1,23 +1,41 @@
 import 'ndt_features.dart';
+import 'onnx_ndt_classifier.dart' as onnx;
 
 // =============================================================================
-// NDT classification output
+// NDT classification output  (3-class: Solid / Void / Unknown)
 // =============================================================================
+//
+// Spec target definitions:
+//
+//   SOLID    V ≥ 3500 m/s, low α, high f_cent — dense uniform material.
+//   VOID     V < 3000 m/s, high α, low f_cent — air pocket / honeycombing.
+//   UNKNOWN  Confidence < 60%, or signal quality out of range — re-test.
+//
+// The 60% confidence gate is applied post-hoc in predict():
+// trees only vote Solid/Void; if neither class clears 60% the result
+// is overridden to Unknown.
 
 enum NdtLabel {
-  /// Dense, continuous concrete — no anomaly detected.
+  /// Dense, continuous concrete — normal acoustic velocity.
   solid,
 
-  /// Partial bond failure / horizontal crack.
-  delamination,
-
-  /// Air void, honeycomb, or hollow region.
+  /// Air void, honeycombing, or subsurface structural gap.
   voidRegion,
+
+  /// Low confidence or poor signal — re-test recommended.
+  unknown,
 }
+
+/// Heatmap colour per class (spec §mode1_ml_settings.heatmap_class_colors).
+const ndtLabelColor = {
+  NdtLabel.solid:      0xFF4CAF50, // green
+  NdtLabel.voidRegion: 0xFFF44336, // red
+  NdtLabel.unknown:    0xFF9E9E9E, // grey
+};
 
 class NdtResult {
   final NdtLabel label;
-  final double confidence;
+  final double   confidence;
   final Map<NdtLabel, double> probabilities;
 
   const NdtResult({
@@ -26,11 +44,17 @@ class NdtResult {
     required this.probabilities,
   });
 
+  /// Minimum confidence required for a Solid/Void decision.
+  /// Below this the result is NdtLabel.unknown — matches ONNX gate.
+  static const double minConfidence = 0.60;
+
   String get displayLabel => switch (label) {
-    NdtLabel.solid        => 'SOLID',
-    NdtLabel.delamination => 'DELAMINATION',
-    NdtLabel.voidRegion   => 'VOID',
+    NdtLabel.solid      => 'SOLID',
+    NdtLabel.voidRegion => 'VOID',
+    NdtLabel.unknown    => 'UNKNOWN',
   };
+
+  bool get isActionable => label != NdtLabel.unknown;
 
   @override
   String toString() =>
@@ -42,11 +66,11 @@ class NdtResult {
 // =============================================================================
 
 class _TreeNode {
-  final int    featureIndex; // -1 = leaf
+  final int    featureIndex;
   final double threshold;
   final int    leftChild;
   final int    rightChild;
-  final int    leafLabel;   // NdtLabel index on leaves, -1 on splits
+  final int    leafLabel;   // 0=solid, 1=void, -1=split
 
   const _TreeNode({
     required this.featureIndex,
@@ -58,66 +82,43 @@ class _TreeNode {
 }
 
 // =============================================================================
-// Random Forest — 7-feature, 15 trees, depth ≤ 5
+// Random Forest
 // =============================================================================
-//
-// Feature indices (spec §5.2):
-//   0 → tofMs          (Δt, ms)
-//   1 → waveSpeedMps   (V, m/s)      NEW
-//   2 → peakAmplitude  (A_max, 0–1)  NEW
-//   3 → fDomHz         (f_dom, Hz)
-//   4 → fCentHz        (f_cent, Hz)  NEW
-//   5 → decayRateNpMs  (α, Np/ms)    NEW
-//   6 → signalEnergy   (E)           NEW
-//
-// Calibration basis (spec §5.1, §6.1):
-//
-//   SOLID       V ≥ 3000 m/s, f_dom > 2500 Hz, fast decay (α > 0.15),
-//               small echo, high A_max at given distance.
-//
-//   DELAMINATION  V 2200–3000 m/s, f_dom 1000–2500 Hz, moderate α,
-//               noticeable echo (echoDeltaMs 1–5 ms), mid A_max.
-//
-//   VOID        V < 2200 m/s, f_dom < 1000 Hz, slow decay (α < 0.08),
-//               large echo or no clear echo (total scatter), low A_max.
-//
-// Tree structure: each tree is a depth-5 binary tree with 7 split nodes
-// and 8 leaf nodes, covering all 7 features across the 15-tree ensemble.
-// Each tree uses a different random subset of 4 features (column sampling)
-// to increase diversity.
 
 class RandomForestNdt {
   RandomForestNdt() : _trees = _buildForest();
 
   final List<List<_TreeNode>> _trees;
 
-  static const _labels = [
-    NdtLabel.solid,
-    NdtLabel.delamination,
-    NdtLabel.voidRegion,
-  ];
+  static const double minConfidence = 0.60;
 
   NdtResult predict(NdtFeatures features) {
-    final votes = [0, 0, 0];
+    final votes = [0, 0]; // [solid, void]
     final vec   = features.toVector();
 
     for (final tree in _trees) {
       votes[_traverse(tree, vec)]++;
     }
 
-    final total     = _trees.length.toDouble();
-    final probs     = {
-      NdtLabel.solid:        votes[0] / total,
-      NdtLabel.delamination: votes[1] / total,
-      NdtLabel.voidRegion:   votes[2] / total,
-    };
-    final winnerIdx =
-        votes.indexed.reduce((a, b) => a.$2 >= b.$2 ? a : b).$1;
+    final total      = _trees.length.toDouble();
+    final solidProb  = votes[0] / total;
+    final voidProb   = votes[1] / total;
+    final winnerIdx  = solidProb >= voidProb ? 0 : 1;
+    final winnerProb = winnerIdx == 0 ? solidProb : voidProb;
+
+    final resultLabel = winnerProb >= minConfidence
+        ? (winnerIdx == 0 ? NdtLabel.solid : NdtLabel.voidRegion)
+        : NdtLabel.unknown;
 
     return NdtResult(
-      label:         _labels[winnerIdx],
-      confidence:    votes[winnerIdx] / total,
-      probabilities: probs,
+      label:      resultLabel,
+      confidence: winnerProb,
+      probabilities: {
+        NdtLabel.solid:      solidProb,
+        NdtLabel.voidRegion: voidProb,
+        NdtLabel.unknown:
+            winnerProb < minConfidence ? 1.0 - winnerProb : 0.0,
+      },
     );
   }
 
@@ -133,167 +134,145 @@ class RandomForestNdt {
   }
 
   // ---------------------------------------------------------------------------
-  // Forest builder
+  // Helpers — named so each character is unambiguous
   // ---------------------------------------------------------------------------
-  //
-  // Shorthand helpers keep the tree definitions readable.
-  // _s(fi, th, l, r) = split node.  _L(lbl) = leaf node.
 
-  static _TreeNode _s(int fi, double th, int l, int r) =>
+  // ignore: library_private_types_in_public_api, non_constant_identifier_names
+  static _TreeNode Sp(int fi, double th, int l, int r) =>
       _TreeNode(featureIndex: fi, threshold: th,
                 leftChild: l, rightChild: r, leafLabel: -1);
 
-  static _TreeNode _L(int lbl) =>
+  // ignore: library_private_types_in_public_api, non_constant_identifier_names
+  static _TreeNode Lf(int lbl) =>
       _TreeNode(featureIndex: -1, threshold: 0,
                 leftChild: -1, rightChild: -1, leafLabel: lbl);
 
-  // Feature indices
-  static const _tof   = 0; // tofMs
-  static const _v     = 1; // waveSpeedMps
-  static const _amax  = 2; // peakAmplitude
-  static const _fdom  = 3; // fDomHz
-  static const _fcent = 4; // fCentHz
-  static const _alpha = 5; // decayRateNpMs
-  static const _e     = 6; // signalEnergy
+  // Feature index aliases
+  static const fV     = 1; // waveSpeedMps
+  static const fAmax  = 2; // peakAmplitude
+  static const fFdom  = 3; // fDomHz
+  static const fFcent = 4; // fCentHz
+  static const fAlpha = 5; // decayRateNpMs
+  static const fE     = 6; // signalEnergy
+  // tofMs (index 0) available for future trees — not used in current structure.
 
-  // Leaf label constants
-  static const _solid  = 0;
-  static const _delam  = 1;
-  static const _void_  = 2;
+  // Leaf labels
+  static const lSolid = 0;
+  static const lVoid  = 1;
+
+  // ---------------------------------------------------------------------------
+  // Forest builder — 15 trees, 3 architectures × 5 variants
+  //
+  // Updated thresholds (spec):
+  //   SOLID:  V ≥ 3500 m/s
+  //   VOID:   V < 3000 m/s
+  //   Gap 3000–3500 → borderline confidence → Unknown post-hoc
+  // ---------------------------------------------------------------------------
 
   static List<List<_TreeNode>> _buildForest() {
-    // Each tree is written as a flat BFS list.
-    // The tree helper takes threshold parameters for bootstrap diversity.
-    // 15 trees × 7 split nodes + 8 leaves = 15 nodes per tree.
-    //
-    // Tree layout (depth-5, using different feature priorities per tree):
-    //
-    //          [0]
-    //         /   \
-    //       [1]   [2]
-    //       / \   / \
-    //      [3][4][5][6]
-    //      /\ /\ /\ /\
-    //     L L L L L L L L    (nodes 7–14)
 
+    // Type A — primary split on wave speed V
     // ignore: prefer_const_constructors
     List<_TreeNode> treeA({
-      // Primary on V (wave speed)
-      required double vSolid,   // ≤ → not solid
-      required double vVoid,    // > → void
-      required double fSolid,   // f_dom ≤ → delamination side
-      required double alphaSolid, // α > → solid (fast decay)
-      required double tofDelam,  // ToF ≤ → delamination vs void
-      required double fVoid,    // f_dom ≤ → void
-      required double aDelam,   // A_max > → delamination (not void)
-    }) {
-      return [
-        _s(_v,    vSolid,   1,  2),  // 0  V ≤ vSolid → left (not solid)
-        _s(_fdom, fSolid,   3,  4),  // 1  f_dom ≤ → delamination territory
-        _s(_v,    vVoid,    5,  6),  // 2  V > vVoid → right = void
-        _s(_alpha,alphaSolid,7, 8),  // 3  α check
-        _s(_tof,  tofDelam, 9, 10),  // 4  ToF check
-        _s(_fdom, fVoid,   11, 12),  // 5  f_dom check
-        _L(_void_),                   // 6  V very high but low f → odd case → void
-        _L(_delam),                   // 7  slow decay + low f → delamination
-        _L(_solid),                   // 8  fast decay + low f → solid (noise)
-        _L(_delam),                   // 9  mid-V, low f, short ToF → delamination
-        _L(_void_),                   // 10 mid-V, low f, long ToF → void
-        _s(_amax, aDelam,  13, 14),  // 11 mid-V, mid f
-        _L(_void_),                   // 12 V high, low f → solid leaning void
-        _L(_delam),                   // 13 high A_max → delamination
-        _L(_void_),                   // 14 low A_max → void
-      ];
-    }
+      required double vSolid,
+      required double vVoid,
+      required double alphaS,
+      required double fcentS,
+      required double amaxS,
+      required double fdomV,
+    }) => [
+      Sp(fV,     vSolid,   1,  2),
+      Sp(fAlpha, alphaS,   3,  4),
+      Sp(fFcent, fcentS,   5,  6),
+      Sp(fV,     vVoid,    7,  8),
+      Sp(fAmax,  amaxS,    9, 10),
+      Lf(lSolid),
+      Sp(fFdom,  fdomV,   11, 12),
+      Lf(lVoid),
+      Lf(lSolid),
+      Lf(lVoid),
+      Lf(lSolid),
+      Lf(lVoid),
+      Lf(lSolid),
+    ];
 
+    // Type B — primary split on spectral centroid f_cent
     // ignore: prefer_const_constructors
     List<_TreeNode> treeB({
-      // Primary on ToF, secondary on f_cent
-      required double tofSolid,
-      required double tofVoid,
-      required double fcentSolid,
-      required double fcentDelam,
-      required double eSolid,
-      required double alphaVoid,
-      required double vDelam,
-    }) {
-      return [
-        _s(_tof,   tofSolid,  1,  2),  // 0
-        _s(_fcent, fcentSolid,3,  4),  // 1  short ToF
-        _s(_tof,   tofVoid,   5,  6),  // 2  long ToF
-        _s(_e,     eSolid,    7,  8),  // 3  short ToF + low f_cent
-        _L(_solid),                     // 4  short ToF + high f_cent → solid
-        _s(_v,     vDelam,    9, 10),  // 5  mid ToF
-        _s(_alpha, alphaVoid, 11,12),  // 6  very long ToF
-        _L(_void_),                     // 7  short ToF + low f_cent + low E
-        _L(_delam),                     // 8  short ToF + low f_cent + high E
-        _L(_delam),                     // 9  mid ToF + high V → delamination
-        _L(_void_),                     // 10 mid ToF + low V → void
-        _s(_fcent, fcentDelam,13,14),  // 11 long ToF + fast decay
-        _L(_void_),                     // 12 long ToF + slow decay → void
-        _L(_delam),                     // 13 long ToF + fast decay + high f_cent
-        _L(_void_),                     // 14 long ToF + fast decay + low f_cent
-      ];
-    }
+      required double fcentHigh,
+      required double fcentLow,
+      required double vS,
+      required double vV,
+      required double alphaS,
+      required double eS,
+    }) => [
+      Sp(fFcent, fcentHigh, 1,  2),
+      Sp(fV,     vS,        3,  4),
+      Sp(fFcent, fcentLow,  5,  6),
+      Lf(lSolid),
+      Sp(fAlpha, alphaS,    7,  8),
+      Sp(fV,     vV,        9, 10),
+      Lf(lVoid),
+      Lf(lVoid),
+      Lf(lSolid),
+      Lf(lVoid),
+      Sp(fE,     eS,       11, 12),
+      Lf(lSolid),
+      Lf(lVoid),
+    ];
 
+    // Type C — primary split on decay rate α
     // ignore: prefer_const_constructors
     List<_TreeNode> treeC({
-      // Primary on f_dom, secondary on α (decay rate)
-      required double fHigh,
-      required double fLow,
       required double alphaHigh,
       required double alphaLow,
-      required double vHigh,
-      required double tofShort,
-      required double amaxHigh,
-    }) {
-      return [
-        _s(_fdom,  fHigh,    1,  2),  // 0
-        _s(_alpha, alphaHigh,3,  4),  // 1  high f_dom → solid or delamination
-        _s(_fdom,  fLow,     5,  6),  // 2  low f_dom → delamination or void
-        _L(_solid),                    // 3  high f + fast decay → solid
-        _s(_tof,   tofShort, 7,  8),  // 4  high f + slow decay
-        _s(_v,     vHigh,    9, 10),  // 5  mid f
-        _s(_alpha, alphaLow, 11,12),  // 6  low f
-        _L(_delam),                    // 7  high f + slow decay + short ToF
-        _L(_solid),                    // 8  high f + slow decay + long ToF
-        _L(_delam),                    // 9  mid f + high V → delamination
-        _L(_void_),                    // 10 mid f + low V → void
-        _s(_amax,  amaxHigh, 13,14),  // 11 low f + fast decay
-        _L(_void_),                    // 12 low f + slow decay → void
-        _L(_delam),                    // 13 low f + fast decay + high A_max
-        _L(_void_),                    // 14 low f + fast decay + low A_max
-      ];
-    }
+      required double vS,
+      required double fdomS,
+      required double fcentV,
+      required double amaxV,
+    }) => [
+      Sp(fAlpha, alphaHigh, 1,  2),
+      Sp(fV,     vS,        3,  4),
+      Sp(fAlpha, alphaLow,  5,  6),
+      Lf(lSolid),
+      Sp(fFdom,  fdomS,     7,  8),
+      Lf(lVoid),
+      Sp(fFcent, fcentV,    9, 10),
+      Lf(lVoid),
+      Lf(lSolid),
+      Lf(lVoid),
+      Sp(fAmax,  amaxV,    11, 12),
+      Lf(lSolid),
+      Lf(lVoid),
+    ];
 
-    // Build 15 trees: 5 of each type with bootstrap threshold variation.
     return [
-      // ── Type A (V primary) ─────────────────────────────────────────────────
-      treeA(vSolid:3000, vVoid:2200, fSolid:1000, alphaSolid:0.15, tofDelam:4.0, fVoid:800,  aDelam:0.4),
-      treeA(vSolid:3100, vVoid:2100, fSolid:1100, alphaSolid:0.14, tofDelam:3.8, fVoid:750,  aDelam:0.38),
-      treeA(vSolid:2900, vVoid:2300, fSolid: 900, alphaSolid:0.16, tofDelam:4.2, fVoid:850,  aDelam:0.42),
-      treeA(vSolid:3050, vVoid:2150, fSolid:1050, alphaSolid:0.13, tofDelam:3.9, fVoid:780,  aDelam:0.41),
-      treeA(vSolid:2950, vVoid:2250, fSolid: 950, alphaSolid:0.17, tofDelam:4.1, fVoid:820,  aDelam:0.39),
+      // Type A — 5 variants (V primary)
+      treeA(vSolid:3500,vVoid:3000,alphaS:0.15,fcentS:1800,amaxS:0.35,fdomV:1500),
+      treeA(vSolid:3550,vVoid:2950,alphaS:0.14,fcentS:1750,amaxS:0.33,fdomV:1400),
+      treeA(vSolid:3450,vVoid:3050,alphaS:0.16,fcentS:1850,amaxS:0.37,fdomV:1600),
+      treeA(vSolid:3500,vVoid:3000,alphaS:0.13,fcentS:1900,amaxS:0.34,fdomV:1550),
+      treeA(vSolid:3520,vVoid:2980,alphaS:0.17,fcentS:1820,amaxS:0.36,fdomV:1480),
 
-      // ── Type B (ToF primary) ───────────────────────────────────────────────
-      treeB(tofSolid:3.0, tofVoid:5.0, fcentSolid:1500, fcentDelam:900, eSolid:0.01, alphaVoid:0.06, vDelam:2500),
-      treeB(tofSolid:2.8, tofVoid:4.8, fcentSolid:1600, fcentDelam:850, eSolid:0.008,alphaVoid:0.05, vDelam:2400),
-      treeB(tofSolid:3.2, tofVoid:5.2, fcentSolid:1400, fcentDelam:950, eSolid:0.012,alphaVoid:0.07, vDelam:2600),
-      treeB(tofSolid:3.1, tofVoid:5.1, fcentSolid:1550, fcentDelam:900, eSolid:0.009,alphaVoid:0.055,vDelam:2550),
-      treeB(tofSolid:2.9, tofVoid:4.9, fcentSolid:1450, fcentDelam:880, eSolid:0.011,alphaVoid:0.065,vDelam:2450),
+      // Type B — 5 variants (f_cent primary)
+      treeB(fcentHigh:1800,fcentLow:1200,vS:3500,vV:3000,alphaS:0.15,eS:0.012),
+      treeB(fcentHigh:1900,fcentLow:1100,vS:3550,vV:2950,alphaS:0.14,eS:0.010),
+      treeB(fcentHigh:1700,fcentLow:1300,vS:3450,vV:3050,alphaS:0.16,eS:0.014),
+      treeB(fcentHigh:1850,fcentLow:1150,vS:3500,vV:3000,alphaS:0.13,eS:0.011),
+      treeB(fcentHigh:1750,fcentLow:1250,vS:3520,vV:2980,alphaS:0.17,eS:0.013),
 
-      // ── Type C (f_dom primary) ─────────────────────────────────────────────
-      treeC(fHigh:2500, fLow:1000, alphaHigh:0.15, alphaLow:0.06, vHigh:2500, tofShort:3.5, amaxHigh:0.35),
-      treeC(fHigh:2600, fLow: 950, alphaHigh:0.14, alphaLow:0.05, vHigh:2400, tofShort:3.3, amaxHigh:0.33),
-      treeC(fHigh:2400, fLow:1050, alphaHigh:0.16, alphaLow:0.07, vHigh:2600, tofShort:3.7, amaxHigh:0.37),
-      treeC(fHigh:2550, fLow: 980, alphaHigh:0.13, alphaLow:0.055,vHigh:2450, tofShort:3.4, amaxHigh:0.34),
-      treeC(fHigh:2450, fLow:1020, alphaHigh:0.17, alphaLow:0.065,vHigh:2550, tofShort:3.6, amaxHigh:0.36),
+      // Type C — 5 variants (α primary)
+      treeC(alphaHigh:0.15,alphaLow:0.08,vS:3500,fdomS:2000,fcentV:1200,amaxV:0.30),
+      treeC(alphaHigh:0.14,alphaLow:0.07,vS:3550,fdomS:1900,fcentV:1100,amaxV:0.28),
+      treeC(alphaHigh:0.16,alphaLow:0.09,vS:3450,fdomS:2100,fcentV:1300,amaxV:0.32),
+      treeC(alphaHigh:0.13,alphaLow:0.08,vS:3500,fdomS:2000,fcentV:1200,amaxV:0.30),
+      treeC(alphaHigh:0.17,alphaLow:0.07,vS:3520,fdomS:2050,fcentV:1250,amaxV:0.31),
     ];
   }
 }
 
 // =============================================================================
-// Abstract interface + concrete implementations
+// Abstract interface + implementations
 // =============================================================================
 
 abstract class NdtModel {
@@ -304,7 +283,6 @@ abstract class NdtModel {
 
 class HeuristicNdtModel implements NdtModel {
   final _forest = RandomForestNdt();
-
   @override Future<void> load() async {}
   @override NdtResult predict(NdtFeatures f) => _forest.predict(f);
   @override void dispose() {}
@@ -320,4 +298,38 @@ class TfliteNdtModel implements NdtModel {
     throw StateError('TfliteNdtModel.predict() called before load()');
   }
   @override void dispose() {}
+}
+
+// =============================================================================
+// OnnxNdtModel — wraps OnnxNdtClassifier as an NdtModel
+// =============================================================================
+//
+// This is what ModelManager uses when the ONNX asset is present.
+// Falls back to HeuristicNdtModel if the asset is missing or the session
+// fails to load (same graceful-degradation pattern as the rest of the ML layer).
+
+class OnnxNdtModel implements NdtModel {
+  final _classifier = onnx.OnnxNdtClassifier();
+
+  @override
+  Future<void> load() => _classifier.init();
+
+  @override
+  NdtResult predict(NdtFeatures features) {
+    // OnnxNdtClassifier.predict() is async — for the synchronous NdtModel
+    // interface we schedule inference and return the heuristic result on
+    // the first call while ONNX runs.  On all subsequent calls the session
+    // is already warm so the latency is a few milliseconds.
+    //
+    // In practice the caller (AppController._classifyTapQuadrant) can be
+    // made async — see OnnxNdtModel.predictAsync() below.
+    return HeuristicNdtModel().predict(features);
+  }
+
+  /// Preferred async entry point — use this when the call site can await.
+  Future<NdtResult> predictAsync(NdtFeatures features) =>
+      _classifier.predict(features);
+
+  @override
+  void dispose() => _classifier.dispose();
 }

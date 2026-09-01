@@ -386,13 +386,13 @@ class VoxelMapPainter extends CustomPainter {
     }
   }
 
-  /// Draws the NDT classification badge (SOLID / DELAMINATION / VOID)
+  /// Draws the NDT classification badge (SOLID / VOID / UNKNOWN)
   /// offset slightly above the TDOA fix ring.
   void _paintNdtBadge(Canvas canvas, NdtResult ndt, Projected p) {
     final color = switch (ndt.label) {
-      NdtLabel.solid        => _c.green,
-      NdtLabel.delamination => _c.amber,
-      NdtLabel.voidRegion   => _c.red,
+      NdtLabel.solid      => _c.green,
+      NdtLabel.voidRegion => _c.red,
+      NdtLabel.unknown    => const Color(0xFF9E9E9E),
     };
 
     final label = '${ndt.displayLabel} '

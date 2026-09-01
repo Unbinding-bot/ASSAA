@@ -22,10 +22,10 @@ import 'data_source.dart';
 /// of the slab arrive 20–50 ms later — the quadrant selector will drop them
 /// automatically, giving the pipeline something real to test against.
 ///
-/// Hidden "anomaly" regions:
-///   _voidPos      — air void (slow ToF, low f_peak, large echo)
-///   _delamPos     — delamination crack (moderate ToF, medium echo)
-///   (rest of slab — solid concrete, fast ToF, high f_peak, small echo)
+/// Hidden anomaly regions:
+///   _voidPos       — air void: slow V (~1800 m/s), low f_cent, high α → VOID
+///   _ambiguousPos  — transitional zone: V 3000–3500 m/s → splits trees → UNKNOWN
+///   (rest of slab) — solid concrete: fast V (~3500+ m/s) → SOLID
 class SimulationService implements DataSource {
   SimulationService({int? seed}) : _rng = math.Random(seed ?? 42);
 
@@ -39,7 +39,7 @@ class SimulationService implements DataSource {
 
   late List<SensorNode> _nodes;
   late Vec3 _voidPos;
-  late Vec3 _delamPos;
+  late Vec3 _ambiguousPos;
   double _rescuerAngle = 0.0;
 
   int _hwClockUs = 0;
@@ -61,7 +61,7 @@ class SimulationService implements DataSource {
 
     // Anomaly positions — not revealed to the UI, only affect physics.
     _voidPos  = const Vec3( 2.5,  2.5, 0.0); // NE quadrant
-    _delamPos = const Vec3(-2.0, -2.0, 0.0); // SW quadrant
+    _ambiguousPos = const Vec3(-2.0, -2.0, 0.0); // SW quadrant
 
     for (final n in _nodes) { _controller.add(n); }
 
@@ -153,7 +153,7 @@ class SimulationService implements DataSource {
       // Bias source toward one of the anomaly regions for realism.
       final pick = _rng.nextDouble();
       _eventSource = pick < 0.35 ? _voidPos
-          : pick < 0.55 ? _delamPos
+          : pick < 0.55 ? _ambiguousPos
           : Vec3(_rand(-3, 3), _rand(-3, 3), 0.0);
       _eventType = ['knock', 'knock', 'metallic'][_rng.nextInt(3)];
       _eventRemainingFrames = switch (_eventType) {
@@ -242,15 +242,15 @@ class SimulationService implements DataSource {
         0.0,
       );
       final toVoid  = midpoint.distanceTo(_voidPos);
-      final toDelam = midpoint.distanceTo(_delamPos);
+      final toDelam = midpoint.distanceTo(_ambiguousPos);
 
       double effectiveVelocity;
       if (toVoid < 1.5) {
-        effectiveVelocity = _wavespeedMps * _rand(0.45, 0.58); // ~1800 m/s
+        effectiveVelocity = _wavespeedMps * _rand(0.45, 0.58); // ~1530–1972 m/s → VOID
       } else if (toDelam < 1.5) {
-        effectiveVelocity = _wavespeedMps * _rand(0.72, 0.82); // ~2700 m/s
+        effectiveVelocity = _wavespeedMps * _rand(0.88, 1.03); // ~2992–3502 m/s → borderline UNKNOWN
       } else {
-        effectiveVelocity = _wavespeedMps * _rand(0.93, 1.05); // ~3200–3600
+        effectiveVelocity = _wavespeedMps * _rand(1.03, 1.12); // ~3502–3808 m/s → SOLID
       }
 
       var travelMs = (distM / effectiveVelocity) * 1000.0 + _rand(-0.2, 0.2);
@@ -306,7 +306,7 @@ class SimulationService implements DataSource {
   void _emitLegacyCluster() {
     final isKnock   = _rng.nextBool();
     // Bias source toward an anomaly so quadrant selection has something to find.
-    final sourcePos = _rng.nextDouble() < 0.6 ? _voidPos : _delamPos;
+    final sourcePos = _rng.nextDouble() < 0.6 ? _voidPos : _ambiguousPos;
     const baseT = 0.0;
 
     for (final node in _nodes) {

@@ -1,4 +1,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ── Network permissions (required for Wi-Fi UDP streaming + WebSocket) ── -->
+    <!-- INTERNET: open TCP/UDP sockets to the ESP32-C3 gateway -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- ACCESS_NETWORK_STATE: check whether Wi-Fi is connected before streaming -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- CHANGE_NETWORK_STATE: required to join a specific Wi-Fi AP programmatically -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- ACCESS_WIFI_STATE: read SSID / BSSID, used for FTM channel selection -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- CHANGE_WIFI_STATE: needed if the app requests a Wi-Fi connection itself -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- ACCESS_FINE_LOCATION: required on Android 8+ to scan for Wi-Fi networks
+         (framework dependency — not used for GPS in this app) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- FOREGROUND_SERVICE: keeps the UDP receiver alive when the app is backgrounded -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
     <application
         android:label="assaa"
         android:name="${applicationName}"

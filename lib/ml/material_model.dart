@@ -1,7 +1,3 @@
-import 'dart:developer' as dev;
-
-import 'package:tflite_flutter/tflite_flutter.dart';
-
 /// What an active-mode tap path most likely passed through.
 enum MaterialType { concrete, airVoid, possibleBody, unknown }
 
@@ -93,50 +89,27 @@ class HeuristicMaterialModel implements MaterialModel {
   void dispose() {}
 }
 
-/// Backbone for a trained on-device model, mirroring
-/// TflitePersonPresenceModel. Expects `assets/models/material.tflite`
-/// with a 4-input, 4-class-softmax output; falls back to the heuristic
-/// via ModelManager if the asset isn't present.
+/// Backbone for a trained on-device model. Once a TFLite or ONNX asset
+/// exists at `assets/models/material.tflite`, wire a runtime loader here
+/// (see OnnxNdtModel for the ONNX pattern). Until then, load() throws
+/// UnimplementedError and ModelManager falls back to HeuristicMaterialModel.
 class TfliteMaterialModel implements MaterialModel {
   TfliteMaterialModel({this.assetPath = 'assets/models/material.tflite'});
   final String assetPath;
-  Interpreter? _interpreter;
-
-  static const _classOrder = [
-    MaterialType.concrete,
-    MaterialType.airVoid,
-    MaterialType.possibleBody,
-    MaterialType.unknown,
-  ];
 
   @override
   Future<void> load() async {
-    _interpreter = await Interpreter.fromAsset(assetPath);
+    throw UnimplementedError(
+      'No trained material model asset yet. '
+      'Place a trained .tflite or .onnx file at $assetPath and wire a '
+      'runtime loader here (see OnnxNdtModel for the ONNX pattern).');
   }
 
   @override
   MaterialResult predict(TapFeatures f) {
-    final interpreter = _interpreter;
-    if (interpreter == null) {
-      throw StateError('TfliteMaterialModel.predict() called before load()');
-    }
-    final input = [f.toVector()];
-    final output = [List<double>.filled(_classOrder.length, 0.0)];
-    try {
-      interpreter.run(input, output);
-    } catch (e) {
-      dev.log('Material inference failed: $e', name: 'ml.material');
-      rethrow;
-    }
-    final probs = <MaterialType, double>{};
-    for (var i = 0; i < _classOrder.length; i++) {
-      probs[_classOrder[i]] = output[0][i];
-    }
-    return MaterialResult(probs);
+    throw StateError('TfliteMaterialModel.predict() called before load()');
   }
 
   @override
-  void dispose() {
-    _interpreter?.close();
-  }
+  void dispose() {}
 }

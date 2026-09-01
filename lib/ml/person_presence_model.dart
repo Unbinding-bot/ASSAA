@@ -1,7 +1,3 @@
-import 'dart:developer' as dev;
-
-import 'package:tflite_flutter/tflite_flutter.dart';
-
 import 'feature_vector.dart';
 
 /// Output of the person-presence model: is the transient that produced
@@ -58,42 +54,31 @@ class HeuristicPersonPresenceModel implements PersonPresenceModel {
   void dispose() {}
 }
 
-/// Backbone for a trained on-device model. Loads `assets/models/
-/// person_presence.tflite` if present; if the asset is missing (which it
-/// will be until a trained model exists), `load()` throws and
-/// ModelManager falls back to the heuristic instead. Input/output shapes
-/// assume a single dense layer ending in a sigmoid -- adjust
-/// `SignalFeatures.vectorLength` and the output shape together if the
-/// model architecture changes.
+/// Backbone for a trained on-device model. Once a TFLite asset exists at
+/// `assets/models/person_presence.tflite`, this stub can be replaced with
+/// a full ONNX or TFLite runtime loader (same pattern as OnnxNdtModel).
+/// Until then, load() throws UnimplementedError and ModelManager falls back
+/// to the HeuristicPersonPresenceModel.
 class TflitePersonPresenceModel implements PersonPresenceModel {
-  TflitePersonPresenceModel({this.assetPath = 'assets/models/person_presence.tflite'});
+  TflitePersonPresenceModel({
+    this.assetPath = 'assets/models/person_presence.tflite',
+  });
   final String assetPath;
-  Interpreter? _interpreter;
 
   @override
   Future<void> load() async {
-    _interpreter = await Interpreter.fromAsset(assetPath);
+    throw UnimplementedError(
+      'No trained person-presence model asset yet. '
+      'Place a trained .tflite or .onnx file at $assetPath and wire a '
+      'runtime loader here (see OnnxNdtModel for the ONNX pattern).');
   }
 
   @override
   PersonPresenceResult predict(SignalFeatures f) {
-    final interpreter = _interpreter;
-    if (interpreter == null) {
-      throw StateError('TflitePersonPresenceModel.predict() called before load()');
-    }
-    final input = [f.toVector()];
-    final output = [List<double>.filled(1, 0.0)];
-    try {
-      interpreter.run(input, output);
-    } catch (e) {
-      dev.log('Person-presence inference failed: $e', name: 'ml.person');
-      rethrow;
-    }
-    return PersonPresenceResult(output[0][0]);
+    throw StateError(
+      'TflitePersonPresenceModel.predict() called before load()');
   }
 
   @override
-  void dispose() {
-    _interpreter?.close();
-  }
+  void dispose() {}
 }

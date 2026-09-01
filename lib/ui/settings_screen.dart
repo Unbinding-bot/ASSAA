@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/app_settings.dart';
 import '../models/frequency_band.dart';
+import '../services/settings_persistence.dart';
 import '../theme.dart';
 
 // =============================================================================
@@ -47,6 +48,8 @@ class SettingsScreen extends StatelessWidget {
 
               _sectionHeader('ABOUT', c),
               _AboutTile(c: c),
+              _sectionHeader('DATA', c),
+              _ResetTile(settings: settings, c: c),
 
               const SizedBox(height: 32),
             ],
@@ -511,5 +514,87 @@ class _SettingsTile extends StatelessWidget {
           : null,
       trailing:  trailing,
     );
+  }
+}
+
+// =============================================================================
+// Reset tile
+// =============================================================================
+
+class _ResetTile extends StatelessWidget {
+  const _ResetTile({required this.settings, required this.c});
+  final AppSettings settings;
+  final AppColors   c;
+
+  @override
+  Widget build(BuildContext context) {
+    return _SettingsTile(
+      c:        c,
+      icon:     Icons.restore,
+      title:    'Reset all settings',
+      subtitle: 'Clears saved theme, layers, waypoints, and frequency palette. '
+                'Cannot be undone.',
+      trailing: TextButton(
+        style: TextButton.styleFrom(foregroundColor: c.red),
+        onPressed: () => _confirm(context),
+        child: const Text('Reset', style: TextStyle(fontSize: 12)),
+      ),
+    );
+  }
+
+  void _confirm(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: c.panel,
+        title: Text('Reset settings?',
+            style: TextStyle(color: c.text)),
+        content: Text(
+          'All theme choices, layer toggles, waypoints, and frequency bands '
+          'will be cleared and reset to defaults.',
+          style: TextStyle(color: c.textDim, fontSize: 12),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Cancel', style: TextStyle(color: c.textDim)),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _doReset();
+            },
+            child: Text('Reset', style: TextStyle(color: c.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _doReset() async {
+    // 1. Wipe persisted data.
+    await SettingsPersistence.clear();
+
+    // 2. Reset in-memory state to defaults.
+    settings.setTheme(AppThemeId.sonar);
+    settings.setDarkMode(true);
+    settings.setShowcaseMode(false);
+    settings.resetPalette();
+
+    // Clear waypoints.
+    for (final wp in List.of(settings.waypoints)) {
+      settings.removeWaypoint(wp.id);
+    }
+
+    // Reset layer visibility to defaults.
+    settings.layers
+      ..nodes    = true
+      ..ripples  = true
+      ..heatmap  = false
+      ..flags    = true
+      ..guidance = true;
+    // Trigger layer change via any toggle+revert to fire notifyListeners.
+    settings.toggleLayer('heatmap'); // heatmap: false→true
+    settings.toggleLayer('heatmap'); // heatmap: true→false (restores default)
   }
 }

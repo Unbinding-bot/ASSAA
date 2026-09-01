@@ -90,7 +90,7 @@ class _NodeFilterBank {
 ///   TapCycle arrives
 ///     → selectTriangleFromTapCycle()   picks 3 closest nodes
 ///     → extractNdtFeatures()           ToF, ΔT_echo, f_peak per path
-///     → ndtModel.predict()             SOLID / DELAMINATION / VOID
+///     → ndtModel.predict()             SOLID / VOID / UNKNOWN
 ///     → backProjectTapCycle()          tomography on selected triangle
 ///     → fuseVoxelGrid()
 ///     → lastNdtResult published to UI
@@ -442,7 +442,7 @@ class AppController {
   // MODE 1 — Active NDT  (quadrant select → NDT features → Random Forest)
   // =========================================================================
 
-  void _handleTapCycle(TapCycle cycle) {
+  Future<void> _handleTapCycle(TapCycle cycle) async {
     recentTapCycles.addFirst(cycle);
     while (recentTapCycles.length > 30) { recentTapCycles.removeLast(); }
 
@@ -461,7 +461,7 @@ class AppController {
       // the waveform in TapData.  Since TapData waveforms may not have
       // arrived yet (they're a separate message), we derive features from
       // timing + heuristic waveform models when no raw waveform is cached.
-      final ndtResult = _classifyTapQuadrant(cycle, quadrant);
+      final ndtResult = await _classifyTapQuadrant(cycle, quadrant);
       if (ndtResult != null) {
         lastNdtResult = ndtResult;
         _log('NDT [${quadrant.nodes.map((n) => n.id).join(',')}]: '
@@ -504,7 +504,8 @@ class AppController {
   /// travel-time residual alone (ToF from arrivalMs, echo=0, f_peak inferred
   /// from wavespeed) so the classifier still runs with degraded but non-zero
   /// input.
-  NdtResult? _classifyTapQuadrant(TapCycle cycle, QuadrantResult quadrant) {
+  Future<NdtResult?> _classifyTapQuadrant(
+      TapCycle cycle, QuadrantResult quadrant) async {
     final tapper = nodes[cycle.tapperId];
     if (tapper == null) { return null; }
 
@@ -520,23 +521,53 @@ class AppController {
       // Try raw waveform first.
       final waveform = _cachedPiezoWaveforms[node.id];
       if (waveform != null && waveform.isNotEmpty) {
-        featuresList.add(extractNdtFeatures(waveform, _kSampleRateHz,
-            baselineM: distM));
+        final iNode = impactorNodeFromIds(
+          cycle.tapperId,
+          quadrant.nodes.map((n) => n.id).toList(),
+        );
+        featuresList.add(extractNdtFeatures(
+          waveform,
+          _kSampleRateHz,
+          baselineM:    distM,
+          impactorNode: iNode,
+        ));
       } else {
         // Synthesise from travel-time residual.
         final distM2      = tapper.position.distanceTo(node.position);
         final vMs = distM2 > 0 ? distM2 / (measuredMs / 1000.0) : wavespeedMps;
-        final inferredFdom = (vMs / 340.0 * 1500.0).clamp(200.0, 8000.0);
-        final inferredAlpha = vMs >= 3000 ? 0.18 : vMs >= 2200 ? 0.11 : 0.05;
+        final inferredFdom  = (vMs / 340.0 * 1500.0).clamp(200.0, 8000.0);
+        final inferredAlpha = vMs >= 3500 ? 0.18 : vMs >= 3000 ? 0.11 : 0.05;
+        // Determine one-hot slot from the tapper's rank in the triangle.
+        final iNode = impactorNodeFromIds(
+          cycle.tapperId,
+          quadrant.nodes.map((n) => n.id).toList(),
+        );
         featuresList.add(NdtFeatures(
-          tofMs:         measuredMs,
-          waveSpeedMps:  vMs,
-          peakAmplitude: 0.5,
-          fDomHz:        inferredFdom,
-          fCentHz:       inferredFdom * 0.85,
-          decayRateNpMs: inferredAlpha,
-          signalEnergy:  0.01,
-          sampleRateHz:  _kSampleRateHz,
+          tofMs:           measuredMs,
+          waveSpeedMps:    vMs,
+          peakAmplitude:   0.5,
+          fDomHz:          inferredFdom,
+          fCentHz:         inferredFdom * 0.85,
+          decayRateNpMs:   inferredAlpha,
+          signalEnergy:    0.01,
+          bandLow:         vMs < 3000 ? 0.6 : 0.2,
+          bandMid:         0.2,
+          bandHigh:        vMs >= 3500 ? 0.5 : 0.15,
+          bandVhf:         0.05,
+          bandRatio:       vMs < 3000 ? 3.0 : 0.4,
+          zeroCrossingRate: inferredAlpha * 10,
+          rmsAmplitude:    0.35,
+          crestFactor:     1.4,
+          skewness:        0.0,
+          kurtosis:        0.0,
+          baselineM:       distM2,
+          normTof:         distM2 > 0.01 ? measuredMs / distM2 : 0.0,
+          attenuationDb:   -6.0,
+          meanWaveSpeed:   vMs,
+          stdWaveSpeed:    0.0,
+          meanDecayRate:   inferredAlpha,
+          impactorNode:    iNode,
+          sampleRateHz:    _kSampleRateHz,
         ));
       }
     }
@@ -548,16 +579,45 @@ class AppController {
     double avg(double Function(NdtFeatures) f) =>
         featuresList.map(f).reduce((a, b) => a + b) / featuresList.length;
 
-    final avgFeatures = NdtFeatures(
-      tofMs:         avg((f) => f.tofMs),
-      waveSpeedMps:  avg((f) => f.waveSpeedMps),
-      peakAmplitude: avg((f) => f.peakAmplitude),
-      fDomHz:        avg((f) => f.fDomHz),
-      fCentHz:       avg((f) => f.fCentHz),
-      decayRateNpMs: avg((f) => f.decayRateNpMs),
-      signalEnergy:  avg((f) => f.signalEnergy),
-      sampleRateHz:  _kSampleRateHz,
+    // Determine the impactor node slot for the whole quadrant.
+    final iNode = impactorNodeFromIds(
+      cycle.tapperId,
+      quadrant.nodes.map((n) => n.id).toList(),
     );
+
+    final avgFeatures = NdtFeatures(
+      tofMs:           avg((f) => f.tofMs),
+      waveSpeedMps:    avg((f) => f.waveSpeedMps),
+      peakAmplitude:   avg((f) => f.peakAmplitude),
+      fDomHz:          avg((f) => f.fDomHz),
+      fCentHz:         avg((f) => f.fCentHz),
+      decayRateNpMs:   avg((f) => f.decayRateNpMs),
+      signalEnergy:    avg((f) => f.signalEnergy),
+      bandLow:         avg((f) => f.bandLow),
+      bandMid:         avg((f) => f.bandMid),
+      bandHigh:        avg((f) => f.bandHigh),
+      bandVhf:         avg((f) => f.bandVhf),
+      bandRatio:       avg((f) => f.bandRatio),
+      zeroCrossingRate: avg((f) => f.zeroCrossingRate),
+      rmsAmplitude:    avg((f) => f.rmsAmplitude),
+      crestFactor:     avg((f) => f.crestFactor),
+      skewness:        avg((f) => f.skewness),
+      kurtosis:        avg((f) => f.kurtosis),
+      baselineM:       avg((f) => f.baselineM),
+      normTof:         avg((f) => f.normTof),
+      attenuationDb:   avg((f) => f.attenuationDb),
+      meanWaveSpeed:   avg((f) => f.meanWaveSpeed),
+      stdWaveSpeed:    avg((f) => f.stdWaveSpeed),
+      meanDecayRate:   avg((f) => f.meanDecayRate),
+      impactorNode:    iNode,
+      sampleRateHz:    _kSampleRateHz,
+    );
+
+    // Use the async ONNX path when available; synchronous heuristic otherwise.
+    final onnx = modelManager.onnxNdtModel;
+    if (onnx != null) {
+      return await onnx.predictAsync(avgFeatures);
+    }
     return modelManager.ndtModel.predict(avgFeatures);
   }
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'app_controller.dart';
 import 'models/app_settings.dart';
+import 'services/settings_persistence.dart';
 import 'theme.dart';
 import 'ui/connection_bar.dart';
 import 'ui/console_screen.dart';
@@ -12,21 +13,32 @@ import 'ui/node_list_screen.dart';
 import 'ui/settings_screen.dart';
 import 'ui/showcase_tab.dart';
 
-void main() {
-  runApp(const ASSAA());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Load persisted settings before the first frame so theme/layer state
+  // is correct immediately — no flash of the default palette on startup.
+  final settings = AppSettings();
+  final saved = await SettingsPersistence.load();
+  if (saved.isNotEmpty) { settings.applyJson(saved); }
+
+  // Auto-save every change (debounced to 500 ms).
+  attachAutosave(settings);
+
+  runApp(ASSAA(settings: settings));
 }
 
 class ASSAA extends StatefulWidget {
-  const ASSAA({super.key});
+  const ASSAA({super.key, required this.settings});
+  final AppSettings settings;
 
   @override
   State<ASSAA> createState() => _ASSAAState();
 }
 
 class _ASSAAState extends State<ASSAA> {
-  // Single shared AppSettings instance — passed down to every screen that
-  // needs it. Using ListenableBuilder at each callsite keeps rebuilds local.
-  final AppSettings _settings = AppSettings();
+  // Settings are owned by the root and passed in — already loaded from disk.
+  AppSettings get _settings => widget.settings;
 
   @override
   void dispose() {

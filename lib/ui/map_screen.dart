@@ -67,9 +67,9 @@ class _MapScreenState extends State<MapScreen>
     final double fPeak;
     if (ndt != null) {
       fPeak = switch (ndt.label) {
-        NdtLabel.solid        => 3500.0,
-        NdtLabel.delamination => 1500.0,
-        NdtLabel.voidRegion   =>  400.0,
+        NdtLabel.solid      => 5000.0, // high freq → red ripple (kinetic impact band)
+        NdtLabel.voidRegion =>  300.0, // low freq  → yellow ripple (structural knock band)
+        NdtLabel.unknown    => 1500.0, // mid freq  → green ripple (ambiguous)
       };
     } else {
       fPeak = 300.0 + fix.confidence * 4000.0;
@@ -540,14 +540,14 @@ class _NdtPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = switch (result.label) {
-      NdtLabel.solid        => c.green,
-      NdtLabel.delamination => c.amber,
-      NdtLabel.voidRegion   => c.red,
+      NdtLabel.solid      => c.green,
+      NdtLabel.voidRegion => c.red,
+      NdtLabel.unknown    => const Color(0xFF9E9E9E),
     };
     final icon = switch (result.label) {
-      NdtLabel.solid        => Icons.check_circle_outline,
-      NdtLabel.delamination => Icons.warning_amber_outlined,
-      NdtLabel.voidRegion   => Icons.cancel_outlined,
+      NdtLabel.solid      => Icons.check_circle_outline,
+      NdtLabel.voidRegion => Icons.cancel_outlined,
+      NdtLabel.unknown    => Icons.help_outline,
     };
     final nodeIds =
         quadrant?.nodes.map((n) => n.id.toString()).join(', ') ?? '—';
@@ -582,11 +582,19 @@ class _NdtPanel extends StatelessWidget {
               style: TextStyle(color: c.textDim, fontSize: 10)),
           const SizedBox(height: 2),
           _ProbBar('Solid',
-              result.probabilities[NdtLabel.solid] ?? 0,       c.green, c),
-          _ProbBar('Delam',
-              result.probabilities[NdtLabel.delamination] ?? 0, c.amber, c),
+              result.probabilities[NdtLabel.solid]      ?? 0, c.green,                  c),
           _ProbBar('Void',
-              result.probabilities[NdtLabel.voidRegion] ?? 0,   c.red,   c),
+              result.probabilities[NdtLabel.voidRegion] ?? 0, c.red,                    c),
+          _ProbBar('?',
+              result.probabilities[NdtLabel.unknown]    ?? 0, const Color(0xFF9E9E9E), c),
+          if (result.label == NdtLabel.unknown) ...[
+            const SizedBox(height: 4),
+            Text('Re-test recommended',
+                style: TextStyle(
+                    color:       c.amber,
+                    fontSize:    9,
+                    fontStyle:   FontStyle.italic)),
+          ],
         ],
       ),
     );

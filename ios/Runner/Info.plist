@@ -53,6 +53,33 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+
+	<!-- ── Network permissions (required for UDP streaming + WebSocket to ESP32) ── -->
+
+	<!-- Local network access: needed for UDP broadcast (piezo frames) and
+	     WebSocket connections to the ESP32-C3 SoftAP on the local subnet.
+	     iOS 14+ requires this key — without it the OS silently blocks all
+	     connections to local IP addresses. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ASSAA connects to ESP32-C3 sensor nodes on the local Wi-Fi network to stream acoustic data and send control commands.</string>
+
+	<!-- Bonjour service types: iOS requires you to declare every zero-conf /
+	     mDNS service type your app browses or advertises, even if you only
+	     use raw UDP/TCP. Listing the generic types here satisfies the
+	     NSLocalNetworkUsageDescription requirement on all iOS 14+ devices. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<!-- Raw UDP data stream from ESP32 piezo ADC (port 9000) -->
+		<string>_assaa-udp._udp</string>
+		<!-- WebSocket control channel to the ESP32 gateway (port 81) -->
+		<string>_assaa-ws._tcp</string>
+	</array>
+
+	<!-- Microphone: not used for audio recording, but dart:io UDP socket
+	     binding on iOS can trigger the microphone entitlement check on some
+	     builds. Providing the key prevents a crash if iOS prompts for it. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ASSAA reads acoustic data from external piezo sensors over Wi-Fi — the device microphone is not used.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
